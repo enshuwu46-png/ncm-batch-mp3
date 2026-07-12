@@ -2,34 +2,15 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-WINDOWS_DIR="$ROOT_DIR/windows"
+WINDOWS_DIR="$ROOT_DIR/platforms/windows"
 WIN_FFMPEG="$WINDOWS_DIR/assets/win/ffmpeg.exe"
 
-NODE_BIN="${NODE_BIN:-}"
-PNPM_BIN="${PNPM_BIN:-}"
-PYTHON_BIN="${PYTHON_BIN:-}"
-
-if [[ -z "$NODE_BIN" ]]; then
-  NODE_BIN="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
-fi
-if [[ ! -x "$NODE_BIN" ]]; then
-  NODE_BIN="$(command -v node || true)"
-fi
-if [[ -z "$PNPM_BIN" ]]; then
-  PNPM_BIN="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/pnpm"
-fi
-if [[ ! -x "$PNPM_BIN" ]]; then
-  PNPM_BIN="$(command -v pnpm || true)"
-fi
-if [[ -z "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
-fi
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="$(command -v python3 || true)"
-fi
+NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+PNPM_BIN="${PNPM_BIN:-$(command -v pnpm || true)}"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 
 if [[ -z "$NODE_BIN" || -z "$PNPM_BIN" || -z "$PYTHON_BIN" ]]; then
-  echo "Missing Node.js, pnpm, or Python runtime" >&2
+  echo "Error: Missing Node.js, pnpm, or Python runtime. Please install them first." >&2
   exit 1
 fi
 

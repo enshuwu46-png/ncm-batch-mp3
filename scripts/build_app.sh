@@ -32,7 +32,7 @@ echo "Preparing app bundle..."
 rm -rf "$APP_PATH"
 mkdir -p "$APP_PATH/Contents/MacOS" "$RESOURCES"
 cp "$BUILD_DIR/NCMConverter" "$EXECUTABLE"
-cp "./platforms/macos/Info.plist" "$APP_PATH/Contents/Info.plist"
+cp "$ROOT_DIR/platforms/macos/Info.plist" "$APP_PATH/Contents/Info.plist"
 printf 'APPL????' > "$APP_PATH/Contents/PkgInfo"
 chmod +x "$EXECUTABLE"
 
@@ -60,6 +60,7 @@ else
     echo "ffmpeg checksum mismatch: $ACTUAL_SHA" >&2
     exit 1
   fi
+  cp "$BUILD_DIR/ffmpeg81arm/ffmpeg" "$ROOT_DIR/assets/ffmpeg"
   cp "$BUILD_DIR/ffmpeg81arm/ffmpeg" "$RESOURCES/ffmpeg"
 fi
 chmod +x "$RESOURCES/ffmpeg"
