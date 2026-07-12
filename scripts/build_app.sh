@@ -22,7 +22,7 @@ swiftc \
   -parse-as-library \
   -O \
   -o "$BUILD_DIR/NCMConverter" \
-  "$ROOT_DIR/src/NCMBatchMP3App.swift" \
+  "$ROOT_DIR/src/"*.swift \
   -framework SwiftUI \
   -framework AppKit \
   -framework Combine \
@@ -46,11 +46,11 @@ swiftc \
   "$ROOT_DIR/scripts/make_icon.swift" \
   -framework AppKit
 "$BUILD_DIR/make_icon" "$BUILD_DIR/AppIcon.iconset"
-python3 "$ROOT_DIR/scripts/make_icns.py" "$BUILD_DIR/AppIcon.iconset" "$assets/AppIcon.icns"
+python3 "$ROOT_DIR/scripts/make_icns.py" "$BUILD_DIR/AppIcon.iconset" "$RESOURCES/AppIcon.icns"
 
 echo "Preparing ffmpeg..."
 if [[ -x "$ROOT_DIR/assets/ffmpeg" ]]; then
-  cp "$ROOT_DIR/assets/ffmpeg" "$assets/ffmpeg"
+  cp "$ROOT_DIR/assets/ffmpeg" "$RESOURCES/ffmpeg"
 else
   curl -L "$FFMPEG_URL" -o "$BUILD_DIR/ffmpeg81arm.zip"
   rm -rf "$BUILD_DIR/ffmpeg81arm"
@@ -60,16 +60,16 @@ else
     echo "ffmpeg checksum mismatch: $ACTUAL_SHA" >&2
     exit 1
   fi
-  cp "$BUILD_DIR/ffmpeg81arm/ffmpeg" "$assets/ffmpeg"
+  cp "$BUILD_DIR/ffmpeg81arm/ffmpeg" "$RESOURCES/ffmpeg"
 fi
-chmod +x "$assets/ffmpeg"
+chmod +x "$RESOURCES/ffmpeg"
 
-cp "$ROOT_DIR/assets/FFMPEG_NOTICE.txt" "$assets/FFMPEG_NOTICE.txt"
-cp "$ROOT_DIR/README.md" "$assets/README.md"
+cp "$ROOT_DIR/assets/FFMPEG_NOTICE.txt" "$RESOURCES/FFMPEG_NOTICE.txt"
+cp "$ROOT_DIR/README.md" "$RESOURCES/README.md"
 
 echo "Signing..."
 xattr -cr "$APP_PATH"
-codesign --force --sign - "$assets/ffmpeg"
+codesign --force --sign - "$RESOURCES/ffmpeg"
 codesign --force --deep --sign - "$APP_PATH"
 
 echo "Packaging..."

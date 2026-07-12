@@ -1,18 +1,28 @@
+# --- OS & Editor ---
 .DS_Store
+*.swp
+*.xcuserstate
+
+# --- Swift & Xcode Build ---
 .build/
 build/
-*.xcuserstate
-*.swp
+.swiftpm/
+
+# --- Python ---
 *.pyc
 __pycache__/
+tests/__pycache__/
+
+# --- Windows / Node ---
+windows/node_modules/
+
+# --- External Dependencies & Binaries ---
 assets/ffmpeg
 assets/ffmpeg*.zip
-dist/*.app/
-dist/*.dmg
-dist/*.tar.gz
-!dist/NCM批量转MP3-SwiftUI.app.zip
-tests/__pycache__/
-windows/node_modules/
 windows/assets/win/ffmpeg.exe
-dist/windows/
+
+# --- Build Artifacts (Distribution) ---
 dist/
+*.dmg
+*.zip
+*.tar.gz
