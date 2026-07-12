@@ -25,11 +25,11 @@
     ],
     "extraResources": [
       {
-        "from": "resources/win/ffmpeg.exe",
+        "from": "assets/win/ffmpeg.exe",
         "to": "ffmpeg/ffmpeg.exe"
       },
       {
-        "from": "resources/FFMPEG_WINDOWS_NOTICE.txt",
+        "from": "assets/FFMPEG_WINDOWS_NOTICE.txt",
         "to": "FFMPEG_WINDOWS_NOTICE.txt"
       },
       {

@@ -68,7 +68,7 @@ dist/NCM批量转MP3-SwiftUI.app.zip
 dist/NCM批量转MP3-1.2.0-macOS-arm64.dmg
 ```
 
-构建脚本会优先使用已经存在的 `Resources/ffmpeg`。如果不存在，会尝试从 OSXExperts 下载 Apple Silicon ffmpeg 8.1。
+构建脚本会优先使用已经存在的 `assets/ffmpeg`。如果不存在，会尝试从 OSXExperts 下载 Apple Silicon ffmpeg 8.1。
 
 ### Windows
 
@@ -104,11 +104,11 @@ dist/windows/NCM-Batch-MP3-Setup-1.2.0-x64.exe
 
 - 来源：https://osxexperts.net/
 - 下载后二进制 SHA256：`9a08d61f9328e8164ba560ee7a79958e357307fcfeea6fe626b7d66cdc287028`
-- 签进 App 后 SHA256 会变化，详见 `Resources/FFMPEG_NOTICE.txt`
+- 签进 App 后 SHA256 会变化，详见 `assets/FFMPEG_NOTICE.txt`
 
 该 ffmpeg 构建启用了 `--enable-gpl`。本项目采用 GPLv3-or-later 发布。
 
-Windows 版内置 `@ffmpeg-installer/win32-x64` 提供的 `ffmpeg.exe`，详见 `windows/resources/FFMPEG_WINDOWS_NOTICE.txt`。
+Windows 版内置 `@ffmpeg-installer/win32-x64` 提供的 `ffmpeg.exe`，详见 `windows/assets/FFMPEG_WINDOWS_NOTICE.txt`。
 
 ## 免责声明
 

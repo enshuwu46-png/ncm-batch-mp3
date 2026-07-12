@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WINDOWS_DIR="$ROOT_DIR/windows"
-WIN_FFMPEG="$WINDOWS_DIR/resources/win/ffmpeg.exe"
+WIN_FFMPEG="$WINDOWS_DIR/assets/win/ffmpeg.exe"
 
 NODE_BIN="${NODE_BIN:-}"
 PNPM_BIN="${PNPM_BIN:-}"
@@ -52,7 +52,7 @@ fi
 
 echo "Preparing Windows ffmpeg..."
 if [[ ! -f "$WIN_FFMPEG" ]]; then
-  mkdir -p "$WINDOWS_DIR/resources/win"
+  mkdir -p "$WINDOWS_DIR/assets/win"
   PACKAGE_FFMPEG="$WINDOWS_DIR/node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe"
   if [[ ! -f "$PACKAGE_FFMPEG" ]]; then
     echo "ffmpeg.exe not found in @ffmpeg-installer/win32-x64" >&2
