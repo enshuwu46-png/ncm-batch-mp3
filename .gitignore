@@ -1,19 +1,29 @@
+# --- OS & Editor ---
 .DS_Store
+*.swp
+*.xcuserstate
+.vscode/
+
+# --- Build & Test caches ---
 .build/
 build/
-*.xcuserstate
-*.swp
 *.pyc
 __pycache__/
-Resources/ffmpeg
-Resources/ffmpeg*.zip
+apps/windows/.vs/
+apps/windows/**/bin/
+apps/windows/**/obj/
+
+# --- Node ---
+apps/windows/node_modules/
+
+# --- Bundled binaries (downloaded at build time) ---
+apps/macos/assets/ffmpeg
+apps/macos/assets/ffmpeg*.zip
+apps/windows/resources/win/ffmpeg.exe
+
+# --- Distribution artifacts (released via GitHub Releases) ---
 dist/*.app/
 dist/*.dmg
+dist/*.zip
 dist/*.tar.gz
-!dist/NCM批量转MP3-SwiftUI.app.zip
-tests/__pycache__/
-windows/node_modules/
-windows/**/bin/
-windows/**/obj/
-windows/resources/win/ffmpeg.exe
 dist/windows/
