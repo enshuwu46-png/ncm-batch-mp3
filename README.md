@@ -21,14 +21,14 @@
 - macOS / Windows 均提供队列前的原生“开始使用教程”
 - 启动时自动检测 GitHub Release 新版本，也可手动检查并跳转下载
 - macOS 版内置 Apple Silicon ffmpeg 8.1，Windows 版内置 x64 ffmpeg，无需用户另装 ffmpeg
-- macOS 15.0+ deployment target，面向 macOS 15-27 做兼容；macOS 26+ 在拖拽区和操作区使用系统玻璃效果，旧系统自动降级为兼容材质
+- macOS 12.0+ deployment target，面向 macOS 12-27 做兼容；macOS 26+ 在拖拽区和操作区使用系统玻璃效果，旧系统自动降级为兼容材质
 
 ## 下载
 
 Release 会提供 macOS 常见拖拽安装 DMG 和 Windows 安装器：
 
-- `NCM批量转MP3-1.2.1-macOS-arm64.dmg`
-- `NCM-Batch-MP3-Setup-1.2.1-x64.exe`
+- `NCM批量转MP3-1.2.2-macOS-arm64.dmg`
+- `NCM-Batch-MP3-Setup-1.2.2-x64.exe`
 
 macOS 打开 DMG 后，把 `NCM批量转MP3.app` 拖到 `Applications` 即可。
 
@@ -57,7 +57,7 @@ xattr -cr NCM批量转MP3.app
 
 ### macOS
 
-需要 macOS、Command Line Tools 或 Xcode。
+需要 macOS、Command Line Tools 或 Xcode。生成的 Apple Silicon App 最低支持 macOS 12.0。
 
 ```bash
 ./scripts/build_app.sh
@@ -69,7 +69,7 @@ xattr -cr NCM批量转MP3.app
 ```text
 dist/NCM批量转MP3.app
 dist/NCM批量转MP3-SwiftUI.app.zip
-dist/NCM批量转MP3-1.2.1-macOS-arm64.dmg
+dist/NCM批量转MP3-1.2.2-macOS-arm64.dmg
 ```
 
 构建脚本会优先使用已经存在的 `Resources/ffmpeg`。如果不存在，会尝试从 OSXExperts 下载 Apple Silicon ffmpeg 8.1。
@@ -87,7 +87,7 @@ Windows 版源码在 `windows/`，界面和转换核心均使用 C#，由 WPF �
 构建产物会输出到：
 
 ```text
-dist/windows/NCM-Batch-MP3-Setup-1.2.1-x64.exe
+dist/windows/NCM-Batch-MP3-Setup-1.2.2-x64.exe
 ```
 
 构建脚本会运行 C# 合成 NCM 往返测试、发布 `win-x64` WPF 应用，并将 `@ffmpeg-installer/win32-x64` 提供的 `ffmpeg.exe` 打入安装器。

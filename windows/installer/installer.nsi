@@ -2,7 +2,7 @@
 !include "FileFunc.nsh"
 
 !ifndef VERSION
-  !define VERSION "1.2.1"
+  !define VERSION "1.2.2"
 !endif
 !ifndef PUBLISH_DIR
   !error "PUBLISH_DIR is required"

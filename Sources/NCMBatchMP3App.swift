@@ -1205,6 +1205,24 @@ extension View {
             }
         }
     }
+
+    @ViewBuilder
+    func compatibleHiddenScrollBackground() -> some View {
+        if #available(macOS 13.0, *) {
+            self.scrollContentBackground(.hidden)
+        } else {
+            self
+        }
+    }
+
+    @ViewBuilder
+    func compatibleHiddenListRowSeparator() -> some View {
+        if #available(macOS 13.0, *) {
+            self.listRowSeparator(.hidden)
+        } else {
+            self
+        }
+    }
 }
 
 struct LiquidBackground: View {
@@ -1417,7 +1435,6 @@ struct ContentView: View {
                 Image(systemName: colorScheme == .dark ? "moon.fill" : "sun.max.fill")
                     .font(.system(size: 11, weight: .semibold))
                     .frame(width: 16, height: 16)
-                    .contentTransition(.symbolEffect(.replace))
             }
             .controlSize(.small)
             .liquidButton()
@@ -1527,12 +1544,12 @@ struct ContentView: View {
                     ForEach(model.items) { item in
                         QueueRow(item: item)
                             .tag(item.id)
-                            .listRowSeparator(.hidden)
+                            .compatibleHiddenListRowSeparator()
                             .listRowBackground(Color.clear)
                     }
                 }
                 .listStyle(.inset)
-                .scrollContentBackground(.hidden)
+                .compatibleHiddenScrollBackground()
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
         }
@@ -1821,7 +1838,7 @@ struct LogView: View {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(Color.primary.opacity(0.06), lineWidth: 1)
             }
-            .onChange(of: lines.count) { _, count in
+            .onChange(of: lines.count) { count in
                 guard count > 0 else { return }
                 proxy.scrollTo(count - 1, anchor: .bottom)
             }
