@@ -6,29 +6,24 @@
 
 ## 功能
 
-- macOS 原生 SwiftUI 界面，支持跟随系统的浅色 / 深色外观和手动切换
-- Windows 原生 C# / WPF 桌面应用，不包含 Electron 或浏览器内核；Windows 11 使用系统 Mica 云母背景，旧系统自动回退
-- macOS / Windows 默认跟随系统深浅色，均可通过右上角太阳 / 月亮按钮在本次运行中手动切换
 - 批量添加 `.ncm` 文件
 - 文件夹递归扫描
 - 拖拽导入
 - 输出目录选择
 - 用歌曲信息命名
 - 同名文件覆盖开关
-- 优先输出 MP3 / 保留原始格式
 - MP3 自动写入 NCM 内嵌封面、标题、歌手和专辑标签
 - 队列状态、进度条、日志
-- macOS / Windows 均提供队列前的原生“开始使用教程”
-- 启动时自动检测 GitHub Release 新版本，也可手动检查并跳转下载
-- macOS 版内置 Apple Silicon ffmpeg 8.1，Windows 版内置 x64 ffmpeg，无需用户另装 ffmpeg
-- macOS 12.0+ deployment target，面向 macOS 12-27 做兼容；macOS 26+ 在拖拽区和操作区使用系统玻璃效果，旧系统自动降级为兼容材质
-
+- macOS / Windows 均提供原生“开始使用教程”
+- 启动时自动检测 GitHub Release 新版本，可手动检查跳转下载
+- macOS 版内置 Apple Silicon ffmpeg 8.1，Windows 版内置 x64 ffmpeg
+  
 ## 下载
 
-Release 会提供 macOS 常见拖拽安装 DMG 和 Windows 安装器：
+Release 会提供 macOS DMG 和 Windows 安装器：
 
-- `NCM批量转MP3-1.2.3-macOS-arm64.dmg`
-- `NCM-Batch-MP3-Setup-1.2.3-x64.exe`
+ `NCM批量转MP3-1.2.3-macOS-arm64.dmg`
+ `NCM-Batch-MP3-Setup-1.2.3-x64.exe`
 
 macOS 打开 DMG 后，把 `NCM批量转MP3.app` 拖到 `Applications` 即可。
 
@@ -47,17 +42,13 @@ xattr -cr NCM批量转MP3.app
 3. 构造 key-box
 4. 读取 NCM 内嵌封面并定位后续音频流
 5. 对音频流逐字节异或还原
-6. 识别真实音频头
 7. 如果源音频不是 MP3 且选择优先 MP3，调用内置 ffmpeg 转码
 8. 将封面、标题、歌手和专辑写入 MP3 的 ID3 标签
 
-为避免生成打不开的伪 MP3，解密后的音频头如果无法识别，程序会直接报错。
-
-## 从源码构建
 
 ### macOS
 
-需要 macOS、Command Line Tools 或 Xcode。生成的 Apple Silicon App 最低支持 macOS 12.0。
+需要 macOS、Command Line Tools 或 Xcode。最低支持 macOS 12.0。
 
 ```bash
 ./scripts/build_app.sh
@@ -75,8 +66,6 @@ dist/NCM批量转MP3-1.2.3-macOS-arm64.dmg
 构建脚本会优先使用已经存在的 `Resources/ffmpeg`。如果不存在，会尝试从 OSXExperts 下载 Apple Silicon ffmpeg 8.1。
 
 ### Windows
-
-Windows 版源码在 `windows/`，界面和转换核心均使用 C#，由 WPF 生成原生 x64 桌面程序，再用 NSIS 打包。发布配置为 self-contained，用户无需另装 .NET 或 ffmpeg。
 
 需要 .NET 8 SDK 和 NSIS：
 
