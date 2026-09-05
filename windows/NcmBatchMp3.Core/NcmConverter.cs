@@ -13,6 +13,7 @@ public sealed class NcmConverter
     private static readonly byte[] MetadataKey = Convert.FromHexString("2331346C6A6B5F215C5D2630553C2728");
     private const int ChunkSize = 1024 * 1024;
     private const int MaxCoverBytes = 32 * 1024 * 1024;
+    private const int MaxHeaderBytes = 16 * 1024 * 1024;
 
     public async Task<ConversionResult> ConvertAsync(
         string inputPath,
@@ -42,29 +43,25 @@ public sealed class NcmConverter
             {
                 var target = UniqueOutputPath(options.OutputDirectory, stem, "mp3", options.OverwriteExisting);
                 progress?.Report(new ConversionProgress("transcode", 0.92));
-                try
-                {
-                    await TranscodeToMp3Async(
-                            extraction.AudioPath,
-                            target,
-                            ffmpegPath,
-                            extraction.Metadata,
-                            extraction.CoverPath,
-                            copyAudio: false,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                }
-                catch
-                {
-                    TryDeleteFile(target);
-                    throw;
-                }
+                var embeddedCover = await TranscodeAndCommitMp3Async(
+                        extraction.AudioPath,
+                        target,
+                        options.OverwriteExisting,
+                        ffmpegPath,
+                        extraction.Metadata,
+                        extraction.CoverPath,
+                        copyAudio: false,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 progress?.Report(new ConversionProgress("done", 1));
+                var suffix = !string.IsNullOrWhiteSpace(extraction.CoverPath) && !embeddedCover
+                    ? "（封面无效，已跳过）"
+                    : string.Empty;
                 return new ConversionResult(
                     target,
                     extraction.SourceFormat,
                     true,
-                    $"已从 {extraction.SourceFormat.ToUpperInvariant()} 转码为 MP3");
+                    $"已从 {extraction.SourceFormat.ToUpperInvariant()} 转码为 MP3{suffix}");
             }
 
             if (extraction.SourceFormat == "mp3" &&
@@ -73,25 +70,19 @@ public sealed class NcmConverter
             {
                 var target = UniqueOutputPath(options.OutputDirectory, stem, "mp3", options.OverwriteExisting);
                 progress?.Report(new ConversionProgress("metadata", 0.92));
-                try
-                {
-                    await TranscodeToMp3Async(
-                            extraction.AudioPath,
-                            target,
-                            ffmpegPath,
-                            extraction.Metadata,
-                            extraction.CoverPath,
-                            copyAudio: true,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                }
-                catch
-                {
-                    TryDeleteFile(target);
-                    throw;
-                }
+                var embeddedCover = await TranscodeAndCommitMp3Async(
+                        extraction.AudioPath,
+                        target,
+                        options.OverwriteExisting,
+                        ffmpegPath,
+                        extraction.Metadata,
+                        extraction.CoverPath,
+                        copyAudio: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 progress?.Report(new ConversionProgress("done", 1));
-                return new ConversionResult(target, "mp3", false, "已导出 MP3（含封面）");
+                var coverMessage = embeddedCover ? "已导出 MP3（含封面）" : "已导出 MP3（封面无效，已跳过）";
+                return new ConversionResult(target, "mp3", false, coverMessage);
             }
 
             var extension = preferMp3 && extraction.SourceFormat == "mp3"
@@ -231,7 +222,7 @@ public sealed class NcmConverter
 
         await cursor.SkipAsync(2, fileSize).ConfigureAwait(false);
         var keyLength = await cursor.ReadUInt32Async(cancellationToken).ConfigureAwait(false);
-        var encryptedKey = await cursor.ReadAsync(CheckedLength(keyLength), cancellationToken).ConfigureAwait(false);
+        var encryptedKey = await cursor.ReadAsync(CheckedHeaderLength(keyLength, "音频密钥"), cancellationToken).ConfigureAwait(false);
         Xor(encryptedKey, 0x64);
         var decryptedKey = AesEcbDecrypt(encryptedKey, CoreKey);
         if (decryptedKey.Length <= 17)
@@ -241,7 +232,7 @@ public sealed class NcmConverter
 
         var keyBox = BuildKeyBox(decryptedKey.AsSpan(17));
         var metadataLength = await cursor.ReadUInt32Async(cancellationToken).ConfigureAwait(false);
-        var encryptedMetadata = await cursor.ReadAsync(CheckedLength(metadataLength), cancellationToken)
+        var encryptedMetadata = await cursor.ReadAsync(CheckedHeaderLength(metadataLength, "歌曲信息"), cancellationToken)
             .ConfigureAwait(false);
         Xor(encryptedMetadata, 0x63);
         var metadata = ParseMetadata(encryptedMetadata);
@@ -250,11 +241,11 @@ public sealed class NcmConverter
         return new NcmHeader(keyBox, metadata, coverData, cursor.Position);
     }
 
-    private static int CheckedLength(uint length)
+    private static int CheckedHeaderLength(uint length, string field)
     {
-        if (length == 0 || length > int.MaxValue)
+        if (length == 0 || length > MaxHeaderBytes)
         {
-            throw new InvalidDataException("NCM 头部长度字段异常");
+            throw new InvalidDataException($"{field}长度字段异常");
         }
 
         return checked((int)length);
@@ -598,19 +589,89 @@ public sealed class NcmConverter
     private static void MoveReplacing(string source, string target, bool overwrite)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        if (overwrite && File.Exists(target))
-        {
-            File.Delete(target);
-        }
-
+        var staged = StagingOutputPath(target);
         try
         {
-            File.Move(source, target);
+            File.Copy(source, staged);
+            CommitStagedOutput(staged, target, overwrite);
         }
-        catch (IOException)
+        finally
         {
-            File.Copy(source, target, overwrite);
-            File.Delete(source);
+            TryDeleteFile(staged);
+        }
+    }
+
+    private static string StagingOutputPath(string target)
+    {
+        var directory = Path.GetDirectoryName(target)!;
+        var name = Path.GetFileNameWithoutExtension(target);
+        var extension = Path.GetExtension(target);
+        return Path.Combine(directory, $".{name}.ncm-batch-{Guid.NewGuid():N}{extension}");
+    }
+
+    private static void CommitStagedOutput(string staged, string target, bool overwrite)
+    {
+        if (!File.Exists(target))
+        {
+            File.Move(staged, target);
+            return;
+        }
+
+        if (!overwrite)
+        {
+            throw new IOException($"输出文件已存在：{Path.GetFileName(target)}");
+        }
+
+        File.Replace(staged, target, null);
+    }
+
+    private static async Task<bool> TranscodeAndCommitMp3Async(
+        string inputPath,
+        string targetPath,
+        bool overwrite,
+        string ffmpegPath,
+        NcmMetadata metadata,
+        string? coverPath,
+        bool copyAudio,
+        CancellationToken cancellationToken)
+    {
+        var staged = StagingOutputPath(targetPath);
+        var embeddedCover = !string.IsNullOrWhiteSpace(coverPath);
+        try
+        {
+            try
+            {
+                await TranscodeToMp3Async(
+                        inputPath,
+                        staged,
+                        ffmpegPath,
+                        metadata,
+                        coverPath,
+                        copyAudio,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch when (embeddedCover)
+            {
+                TryDeleteFile(staged);
+                embeddedCover = false;
+                await TranscodeToMp3Async(
+                        inputPath,
+                        staged,
+                        ffmpegPath,
+                        metadata,
+                        coverPath: null,
+                        copyAudio,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            CommitStagedOutput(staged, targetPath, overwrite);
+            return embeddedCover;
+        }
+        finally
+        {
+            TryDeleteFile(staged);
         }
     }
 
@@ -654,7 +715,6 @@ public sealed class NcmConverter
                 "-codec:v", "mjpeg",
                 "-pix_fmt", "yuvj420p",
                 "-q:v", "2",
-                "-frames:v", "1",
                 "-disposition:v:0", "attached_pic",
                 "-metadata:s:v", "title=Album cover",
                 "-metadata:s:v", "comment=Cover (front)"

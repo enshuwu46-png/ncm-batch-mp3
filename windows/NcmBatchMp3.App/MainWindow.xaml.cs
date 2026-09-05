@@ -51,7 +51,7 @@ public partial class MainWindow : Window
         get
         {
             var version = Assembly.GetEntryAssembly()?.GetName().Version;
-            return version is null ? "1.2.2" : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
+            return version is null ? "1.2.3" : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
         }
     }
 

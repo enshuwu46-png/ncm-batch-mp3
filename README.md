@@ -27,8 +27,8 @@
 
 Release 会提供 macOS 常见拖拽安装 DMG 和 Windows 安装器：
 
-- `NCM批量转MP3-1.2.2-macOS-arm64.dmg`
-- `NCM-Batch-MP3-Setup-1.2.2-x64.exe`
+- `NCM批量转MP3-1.2.3-macOS-arm64.dmg`
+- `NCM-Batch-MP3-Setup-1.2.3-x64.exe`
 
 macOS 打开 DMG 后，把 `NCM批量转MP3.app` 拖到 `Applications` 即可。
 
@@ -69,7 +69,7 @@ xattr -cr NCM批量转MP3.app
 ```text
 dist/NCM批量转MP3.app
 dist/NCM批量转MP3-SwiftUI.app.zip
-dist/NCM批量转MP3-1.2.2-macOS-arm64.dmg
+dist/NCM批量转MP3-1.2.3-macOS-arm64.dmg
 ```
 
 构建脚本会优先使用已经存在的 `Resources/ffmpeg`。如果不存在，会尝试从 OSXExperts 下载 Apple Silicon ffmpeg 8.1。
@@ -87,7 +87,7 @@ Windows 版源码在 `windows/`，界面和转换核心均使用 C#，由 WPF �
 构建产物会输出到：
 
 ```text
-dist/windows/NCM-Batch-MP3-Setup-1.2.2-x64.exe
+dist/windows/NCM-Batch-MP3-Setup-1.2.3-x64.exe
 ```
 
 构建脚本会运行 C# 合成 NCM 往返测试、发布 `win-x64` WPF 应用，并将 `@ffmpeg-installer/win32-x64` 提供的 `ffmpeg.exe` 打入安装器。

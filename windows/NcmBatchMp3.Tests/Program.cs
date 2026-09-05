@@ -62,6 +62,26 @@ internal static class Program
 
             AssertEqual("Codex - Synthetic Track.mp3", Path.GetFileName(result.OutputPath), "元数据命名");
             AssertTrue(File.ReadAllBytes(result.OutputPath).AsSpan().SequenceEqual(expectedAudio), "NCM 往返字节一致");
+
+            var oversizedHeaderPath = Path.Combine(temporaryDirectory, "oversized-header.ncm");
+            await BuildSyntheticNcmAsync(oversizedHeaderPath, expectedAudio, "mp3", "Oversized Header", CoverPng);
+            var oversizedHeader = await File.ReadAllBytesAsync(oversizedHeaderPath);
+            BitConverter.GetBytes((uint)(16 * 1024 * 1024 + 1)).CopyTo(oversizedHeader, 10);
+            await File.WriteAllBytesAsync(oversizedHeaderPath, oversizedHeader);
+            var rejectedOversizedHeader = false;
+            try
+            {
+                await converter.ConvertAsync(
+                    oversizedHeaderPath,
+                    new ConversionOptions(outputDirectory, OutputMode.PreferMp3, false, false),
+                    null,
+                    CancellationToken.None);
+            }
+            catch (InvalidDataException)
+            {
+                rejectedOversizedHeader = true;
+            }
+            AssertTrue(rejectedOversizedHeader, "超大头部字段拒绝");
             Console.WriteLine($"native core roundtrip ok: {Path.GetFileName(result.OutputPath)}");
         }
         finally

@@ -111,6 +111,23 @@ struct ProcessResult {
     let status: Int32
 }
 
+private final class ProcessDataBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        data.append(chunk)
+        lock.unlock()
+    }
+
+    func value() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
+    }
+}
+
 enum ProcessRunner {
     static func run(_ executable: String, arguments: [String], input: Data? = nil) throws -> ProcessResult {
         let process = Process()
@@ -131,16 +148,35 @@ enum ProcessRunner {
             inputPipe = nil
         }
 
+        let stdout = ProcessDataBox()
+        let stderr = ProcessDataBox()
+        let ioGroup = DispatchGroup()
+
+        func drain(_ handle: FileHandle, into box: ProcessDataBox) {
+            ioGroup.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                box.append(handle.readDataToEndOfFile())
+                ioGroup.leave()
+            }
+        }
+
         try process.run()
+        drain(outputPipe.fileHandleForReading, into: stdout)
+        drain(errorPipe.fileHandleForReading, into: stderr)
         if let input, let inputPipe {
-            try inputPipe.fileHandleForWriting.write(contentsOf: input)
-            try inputPipe.fileHandleForWriting.close()
+            ioGroup.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer {
+                    try? inputPipe.fileHandleForWriting.close()
+                    ioGroup.leave()
+                }
+                try? inputPipe.fileHandleForWriting.write(contentsOf: input)
+            }
         }
         process.waitUntilExit()
+        ioGroup.wait()
 
-        let stdout = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderr = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        return ProcessResult(stdout: stdout, stderr: stderr, status: process.terminationStatus)
+        return ProcessResult(stdout: stdout.value(), stderr: stderr.value(), status: process.terminationStatus)
     }
 }
 
@@ -224,6 +260,7 @@ enum NCMConverterCore {
     static let opensslPath = "/usr/bin/openssl"
     static let chunkSize = 1024 * 1024
     static let maxCoverBytes = 32 * 1024 * 1024
+    static let maxHeaderBytes = 16 * 1024 * 1024
 
     struct ParsedHeader {
         let keyBox: [UInt8]
@@ -251,15 +288,17 @@ enum NCMConverterCore {
         if options.outputMode == .original {
             let target = try uniqueURL(options.outputDirectory.appendingPathComponent(stem).appendingPathExtension(extraction.sourceFormat), overwrite: options.overwriteExisting)
             if extraction.sourceFormat == "mp3", let ffmpeg = findFFmpeg(), coverURL != nil {
-                try transcodeToMP3(
+                let embeddedCover = try transcodeAndCommitMP3(
                     inputURL: tempAudioURL,
-                    outputURL: target,
+                    targetURL: target,
+                    overwrite: options.overwriteExisting,
                     ffmpegPath: ffmpeg,
                     metadata: extraction.metadata,
                     coverURL: coverURL,
                     copyAudio: true
                 )
-                return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: "mp3", transcoded: false, message: "已导出 MP3（含封面）")
+                let message = embeddedCover ? "已导出 MP3（含封面）" : "已导出 MP3（封面无效，已跳过）"
+                return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: "mp3", transcoded: false, message: message)
             }
             try moveReplacingIfNeeded(from: tempAudioURL, to: target, overwrite: options.overwriteExisting)
             return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: extraction.sourceFormat, transcoded: false, message: "已导出原始音频")
@@ -268,15 +307,17 @@ enum NCMConverterCore {
         if extraction.sourceFormat == "mp3" {
             let target = try uniqueURL(options.outputDirectory.appendingPathComponent(stem).appendingPathExtension("mp3"), overwrite: options.overwriteExisting)
             if let ffmpeg = findFFmpeg(), coverURL != nil {
-                try transcodeToMP3(
+                let embeddedCover = try transcodeAndCommitMP3(
                     inputURL: tempAudioURL,
-                    outputURL: target,
+                    targetURL: target,
+                    overwrite: options.overwriteExisting,
                     ffmpegPath: ffmpeg,
                     metadata: extraction.metadata,
                     coverURL: coverURL,
                     copyAudio: true
                 )
-                return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: "mp3", transcoded: false, message: "已转换为 MP3（含封面）")
+                let message = embeddedCover ? "已转换为 MP3（含封面）" : "已转换为 MP3（封面无效，已跳过）"
+                return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: "mp3", transcoded: false, message: message)
             }
             try moveReplacingIfNeeded(from: tempAudioURL, to: target, overwrite: options.overwriteExisting)
             return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: "mp3", transcoded: false, message: "已转换为 MP3")
@@ -284,15 +325,17 @@ enum NCMConverterCore {
 
         if let ffmpeg = findFFmpeg() {
             let target = try uniqueURL(options.outputDirectory.appendingPathComponent(stem).appendingPathExtension("mp3"), overwrite: options.overwriteExisting)
-            try transcodeToMP3(
+            let embeddedCover = try transcodeAndCommitMP3(
                 inputURL: tempAudioURL,
-                outputURL: target,
+                targetURL: target,
+                overwrite: options.overwriteExisting,
                 ffmpegPath: ffmpeg,
                 metadata: extraction.metadata,
                 coverURL: coverURL,
                 copyAudio: false
             )
-            return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: extraction.sourceFormat, transcoded: true, message: "已从 \(extraction.sourceFormat.uppercased()) 转码为 MP3")
+            let suffix = coverURL != nil && !embeddedCover ? "（封面无效，已跳过）" : ""
+            return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: extraction.sourceFormat, transcoded: true, message: "已从 \(extraction.sourceFormat.uppercased()) 转码为 MP3\(suffix)")
         }
 
         let target = try uniqueURL(options.outputDirectory.appendingPathComponent(stem).appendingPathExtension(extraction.sourceFormat), overwrite: options.overwriteExisting)
@@ -345,7 +388,7 @@ enum NCMConverterCore {
         }
         _ = try reader.read(count: 2)
 
-        let keyLength = Int(try reader.readUInt32LE())
+        let keyLength = try checkedHeaderLength(try reader.readUInt32LE(), field: "音频密钥")
         let encryptedKey = xor(data: try reader.read(count: keyLength), value: 0x64)
         let decryptedKey = try aes128ECBDecrypt(encryptedKey, key: coreKey)
         guard decryptedKey.count > 17 else {
@@ -354,7 +397,7 @@ enum NCMConverterCore {
         let keyData = Data(decryptedKey.dropFirst(17))
         let keyBox = try buildKeyBox(keyData: keyData)
 
-        let metadataLength = Int(try reader.readUInt32LE())
+        let metadataLength = try checkedHeaderLength(try reader.readUInt32LE(), field: "歌曲信息")
         let encryptedMetadata = xor(data: try reader.read(count: metadataLength), value: 0x63)
         let metadata = try parseMetadata(encryptedMetadata)
 
@@ -404,6 +447,13 @@ enum NCMConverterCore {
             return nil
         }
         return try reader.read(count: Int(imageLength))
+    }
+
+    static func checkedHeaderLength(_ value: UInt32, field: String) throws -> Int {
+        guard value > 0, value <= UInt32(maxHeaderBytes) else {
+            throw NCMConversionError.incompleteFile("\(field)长度字段异常")
+        }
+        return Int(value)
     }
 
     static func aes128ECBDecrypt(_ data: Data, key: Data) throws -> Data {
@@ -640,10 +690,28 @@ enum NCMConverterCore {
     }
 
     static func moveReplacingIfNeeded(from source: URL, to target: URL, overwrite: Bool) throws {
-        if overwrite, FileManager.default.fileExists(atPath: target.path) {
-            try FileManager.default.removeItem(at: target)
+        let staged = stagingURL(for: target)
+        defer { try? FileManager.default.removeItem(at: staged) }
+        try FileManager.default.copyItem(at: source, to: staged)
+        try commitStagedOutput(from: staged, to: target, overwrite: overwrite)
+    }
+
+    static func stagingURL(for target: URL) -> URL {
+        let base = target.deletingPathExtension().lastPathComponent
+        let name = ".\(base).ncm-batch-\(UUID().uuidString)"
+        return target.deletingLastPathComponent().appendingPathComponent(name).appendingPathExtension(target.pathExtension)
+    }
+
+    static func commitStagedOutput(from staged: URL, to target: URL, overwrite: Bool) throws {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: target.path) {
+            guard overwrite else {
+                throw NCMConversionError.output("输出文件已存在：\(target.lastPathComponent)")
+            }
+            _ = try manager.replaceItemAt(target, withItemAt: staged, backupItemName: nil, options: [])
+        } else {
+            try manager.moveItem(at: staged, to: target)
         }
-        try FileManager.default.moveItem(at: source, to: target)
     }
 
     static func findFFmpeg() -> String? {
@@ -671,6 +739,45 @@ enum NCMConverterCore {
             return path
         }
         return nil
+    }
+
+    static func transcodeAndCommitMP3(
+        inputURL: URL,
+        targetURL: URL,
+        overwrite: Bool,
+        ffmpegPath: String,
+        metadata: [String: Any],
+        coverURL: URL?,
+        copyAudio: Bool
+    ) throws -> Bool {
+        let stagedURL = stagingURL(for: targetURL)
+        defer { try? FileManager.default.removeItem(at: stagedURL) }
+
+        var embeddedCover = coverURL != nil
+        do {
+            try transcodeToMP3(
+                inputURL: inputURL,
+                outputURL: stagedURL,
+                ffmpegPath: ffmpegPath,
+                metadata: metadata,
+                coverURL: coverURL,
+                copyAudio: copyAudio
+            )
+        } catch where coverURL != nil {
+            try? FileManager.default.removeItem(at: stagedURL)
+            embeddedCover = false
+            try transcodeToMP3(
+                inputURL: inputURL,
+                outputURL: stagedURL,
+                ffmpegPath: ffmpegPath,
+                metadata: metadata,
+                coverURL: nil,
+                copyAudio: copyAudio
+            )
+        }
+
+        try commitStagedOutput(from: stagedURL, to: targetURL, overwrite: overwrite)
+        return embeddedCover
     }
 
     static func transcodeToMP3(
@@ -704,7 +811,6 @@ enum NCMConverterCore {
                 "-codec:v", "mjpeg",
                 "-pix_fmt", "yuvj420p",
                 "-q:v", "2",
-                "-frames:v", "1",
                 "-disposition:v:0", "attached_pic",
                 "-metadata:s:v", "title=Album cover",
                 "-metadata:s:v", "comment=Cover (front)"

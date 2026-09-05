@@ -48,6 +48,22 @@ def main() -> int:
         actual = outputs[0].read_bytes()
         if actual != expected_audio:
             raise AssertionError("roundtrip audio bytes do not match")
+
+        outputs[0].write_bytes(b"previous output")
+        subprocess.run(
+            [
+                str(APP_BIN),
+                "--cli-convert",
+                str(source),
+                "--output",
+                str(out_dir),
+                "--rename",
+                "--overwrite",
+            ],
+            check=True,
+        )
+        if outputs[0].read_bytes() != expected_audio:
+            raise AssertionError("successful overwrite did not commit the new output")
         print(f"synthetic roundtrip ok: {outputs[0].name}")
     return 0
 
