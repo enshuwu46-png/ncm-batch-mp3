@@ -7,7 +7,7 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>1.2.3</Version>
+    <Version>2.0.0</Version>
     <AssemblyName>NCM Batch MP3</AssemblyName>
     <RootNamespace>NcmBatchMp3.App</RootNamespace>
     <ApplicationIcon>..\assets\icon.ico</ApplicationIcon>

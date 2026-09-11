@@ -5,9 +5,9 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WINDOWS_DIR="$ROOT_DIR/windows"
 BUILD_DIR="$ROOT_DIR/.build/windows-native"
 PUBLISH_DIR="$ROOT_DIR/dist/windows/app"
-OUTPUT_FILE="$ROOT_DIR/dist/windows/NCM-Batch-MP3-Setup-1.2.3-x64.exe"
+OUTPUT_FILE="$ROOT_DIR/dist/windows/NCM-Batch-MP3-Setup-2.0.0-x64.exe"
 WIN_FFMPEG="$WINDOWS_DIR/resources/win/ffmpeg.exe"
-VERSION="1.2.3"
+VERSION="2.0.0"
 
 DOTNET_BIN="${DOTNET_BIN:-$ROOT_DIR/.build/dotnet/dotnet}"
 if [[ ! -x "$DOTNET_BIN" ]]; then
@@ -24,6 +24,10 @@ export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 export DOTNET_CLI_TELEMETRY_OPTOUT=1
 
 mkdir -p "$BUILD_DIR" "$PUBLISH_DIR" "$(dirname "$WIN_FFMPEG")"
+
+echo "Preparing app and installer artwork..."
+python3 "$WINDOWS_DIR/scripts/make_icon.py"
+python3 "$WINDOWS_DIR/scripts/make_installer_assets.py"
 
 if [[ ! -f "$WIN_FFMPEG" ]]; then
   echo "Downloading Windows ffmpeg..."

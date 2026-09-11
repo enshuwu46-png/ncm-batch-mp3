@@ -258,7 +258,7 @@ enum NCMConverterCore {
     static let coreKey = Data(hexString: "687A4852416D736F356B496E62617857")
     static let metaKey = Data(hexString: "2331346C6A6B5F215C5D2630553C2728")
     static let opensslPath = "/usr/bin/openssl"
-    static let chunkSize = 1024 * 1024
+    static let chunkSize = 4 * 1024 * 1024
     static let maxCoverBytes = 32 * 1024 * 1024
     static let maxHeaderBytes = 16 * 1024 * 1024
 
@@ -714,7 +714,13 @@ enum NCMConverterCore {
         }
     }
 
+    private static let resolvedFFmpegPath = locateFFmpeg()
+
     static func findFFmpeg() -> String? {
+        resolvedFFmpegPath
+    }
+
+    private static func locateFFmpeg() -> String? {
         if let bundled = Bundle.main.resourceURL?.appendingPathComponent("ffmpeg").path,
            FileManager.default.isExecutableFile(atPath: bundled) {
             return bundled
@@ -1097,7 +1103,17 @@ final class AppModel: ObservableObject {
     }
 
     func addURLs(_ urls: [URL]) {
-        let discovered = collectNCMFiles(from: urls)
+        let recursive = recursiveFolderSearch
+        appendLog("正在读取文件…")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, urls] in
+            let discovered = Self.collectNCMFiles(from: urls, recursive: recursive)
+            DispatchQueue.main.async {
+                self?.appendDiscoveredURLs(discovered)
+            }
+        }
+    }
+
+    private func appendDiscoveredURLs(_ discovered: [URL]) {
         let existing = Set(items.map { $0.url.standardizedFileURL })
         var added = 0
         for url in discovered {
@@ -1109,10 +1125,16 @@ final class AppModel: ObservableObject {
         }
         if added > 0 {
             appendLog("已添加 \(added) 个文件")
+        } else {
+            appendLog("没有发现新的 NCM 文件")
         }
     }
 
     func collectNCMFiles(from urls: [URL]) -> [URL] {
+        Self.collectNCMFiles(from: urls, recursive: recursiveFolderSearch)
+    }
+
+    nonisolated private static func collectNCMFiles(from urls: [URL], recursive: Bool) -> [URL] {
         let fileManager = FileManager.default
         var result: [URL] = []
 
@@ -1123,15 +1145,21 @@ final class AppModel: ObservableObject {
             }
 
             if isDirectory.boolValue {
-                if recursiveFolderSearch {
-                    if let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+                if recursive {
+                    let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey]
+                    if let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles, .skipsPackageDescendants]) {
                         for case let fileURL as URL in enumerator where fileURL.pathExtension.lowercased() == "ncm" {
-                            result.append(fileURL)
+                            if (try? fileURL.resourceValues(forKeys: keys).isRegularFile) == true {
+                                result.append(fileURL)
+                            }
                         }
                     }
                 } else {
-                    let children = (try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
-                    result.append(contentsOf: children.filter { $0.pathExtension.lowercased() == "ncm" })
+                    let children = (try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])) ?? []
+                    result.append(contentsOf: children.filter {
+                        $0.pathExtension.lowercased() == "ncm"
+                            && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+                    })
                 }
             } else if url.pathExtension.lowercased() == "ncm" {
                 result.append(url)
@@ -1358,39 +1386,30 @@ struct AppMark: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.78),
-                            Color.teal.opacity(0.18)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+                .fill(Color(red: 0.12, green: 0.12, blue: 0.11))
                 .overlay {
                     RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                        .stroke(.white.opacity(0.34), lineWidth: 1)
+                        .stroke(.white.opacity(0.18), lineWidth: 1)
                 }
 
             Circle()
-                .fill(Color.white.opacity(0.74))
-                .frame(width: size * 0.58, height: size * 0.58)
+                .fill(Color(red: 0.93, green: 0.91, blue: 0.87))
+                .frame(width: size * 0.54, height: size * 0.54)
                 .overlay {
                     Circle()
-                        .stroke(Color.cyan.opacity(0.30), lineWidth: size * 0.035)
+                        .stroke(.black.opacity(0.9), lineWidth: size * 0.038)
                 }
 
             Image(systemName: "music.note")
                 .font(.system(size: size * 0.34, weight: .bold))
-                .foregroundStyle(Color(red: 0.05, green: 0.18, blue: 0.22))
+                .foregroundStyle(.black)
                 .offset(x: -size * 0.02, y: -size * 0.02)
 
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: size * 0.20, weight: .bold))
-                .foregroundStyle(.white)
-                .padding(size * 0.09)
-                .background(Color.teal, in: Circle())
+            Image(systemName: "arrow.down")
+                .font(.system(size: size * 0.16, weight: .black))
+                .foregroundStyle(.black)
+                .padding(size * 0.08)
+                .background(Color(red: 0.93, green: 0.91, blue: 0.87), in: Circle())
                 .offset(x: size * 0.28, y: size * 0.27)
         }
         .frame(width: size, height: size)

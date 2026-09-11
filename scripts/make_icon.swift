@@ -74,32 +74,29 @@ for variant in variants {
     let outer = bounds.insetBy(dx: p * 0.035, dy: p * 0.035)
     let outerPath = rounded(outer, p * 0.235)
 
-    NSGraphicsContext.saveGraphicsState()
-    let shadow = NSShadow()
-    shadow.shadowColor = NSColor.black.withAlphaComponent(0.12)
-    shadow.shadowOffset = NSSize(width: 0, height: -p * 0.018)
-    shadow.shadowBlurRadius = p * 0.038
-    shadow.set()
-    c(0.92, 0.90, 0.85).setFill()
+    c(0.12, 0.12, 0.11).setFill()
     outerPath.fill()
-    NSGraphicsContext.restoreGraphicsState()
 
-    c(0.10, 0.10, 0.10, 0.20).setStroke()
+    c(1, 1, 1, 0.18).setStroke()
     outerPath.lineWidth = max(1, p * 0.010)
     outerPath.stroke()
 
-    let discRect = NSRect(x: p * 0.15, y: p * 0.31, width: p * 0.36, height: p * 0.36)
-    c(1, 1, 1, 0.72).setFill()
+    let discRect = NSRect(x: p * 0.16, y: p * 0.30, width: p * 0.38, height: p * 0.38)
+    c(0.93, 0.91, 0.87).setFill()
     NSBezierPath(ovalIn: discRect).fill()
-    c(0.10, 0.10, 0.10, 0.92).setStroke()
+    c(0.02, 0.02, 0.02, 0.94).setStroke()
     let discOutline = NSBezierPath(ovalIn: discRect)
     discOutline.lineWidth = max(1, p * 0.014)
     discOutline.stroke()
 
+    let center = NSRect(x: p * 0.29, y: p * 0.43, width: p * 0.12, height: p * 0.12)
+    c(0.12, 0.12, 0.11).setFill()
+    NSBezierPath(ovalIn: center).fill()
+
     let note = "♪" as NSString
     let noteAttrs: [NSAttributedString.Key: Any] = [
         .font: NSFont.systemFont(ofSize: p * 0.20, weight: .bold),
-        .foregroundColor: c(0.10, 0.10, 0.10, 0.96)
+        .foregroundColor: c(0.06, 0.06, 0.06, 0.96)
     ]
     let noteSize = note.size(withAttributes: noteAttrs)
     if p >= 64 {
@@ -109,20 +106,30 @@ for variant in variants {
         )
     }
 
-    let fileRect = NSRect(x: p * 0.59, y: p * 0.34, width: p * 0.25, height: p * 0.28)
+    let fileRect = NSRect(x: p * 0.62, y: p * 0.34, width: p * 0.22, height: p * 0.28)
     let filePath = rounded(fileRect, p * 0.055)
-    c(1, 1, 1, 0.72).setFill()
+    c(0.93, 0.91, 0.87).setFill()
     filePath.fill()
-    c(0.10, 0.10, 0.10, 0.92).setStroke()
+    c(0.02, 0.02, 0.02, 0.94).setStroke()
     filePath.lineWidth = max(1, p * 0.012)
     filePath.stroke()
-    drawText("MP3", pixels: p, center: NSPoint(x: fileRect.midX, y: fileRect.midY), size: p * 0.050, weight: .heavy, color: c(0.10, 0.10, 0.10))
+
+    c(0.12, 0.12, 0.11).setStroke()
+    for index in 0..<3 {
+        let y = fileRect.minY + p * (0.075 + CGFloat(index) * 0.055)
+        let line = NSBezierPath()
+        line.lineWidth = max(1, p * 0.012)
+        line.lineCapStyle = .round
+        line.move(to: NSPoint(x: fileRect.minX + p * 0.052, y: y))
+        line.line(to: NSPoint(x: fileRect.maxX - p * 0.052, y: y))
+        line.stroke()
+    }
 
     drawArrow(
-        from: NSPoint(x: p * 0.48, y: p * 0.49),
-        to: NSPoint(x: p * 0.60, y: p * 0.49),
+        from: NSPoint(x: p * 0.51, y: p * 0.49),
+        to: NSPoint(x: p * 0.62, y: p * 0.49),
         width: max(1.2, p * 0.018),
-        color: c(0.10, 0.10, 0.10, 0.92)
+        color: c(0.93, 0.91, 0.87, 0.94)
     )
 
     image.unlockFocus()

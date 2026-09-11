@@ -2,7 +2,7 @@
 !include "FileFunc.nsh"
 
 !ifndef VERSION
-  !define VERSION "1.2.3"
+  !define VERSION "2.0.0"
 !endif
 !ifndef PUBLISH_DIR
   !error "PUBLISH_DIR is required"
@@ -35,6 +35,10 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "GPL-3.0-or-later"
 !define MUI_ABORTWARNING
 !define MUI_ICON "${ICON_FILE}"
 !define MUI_UNICON "${ICON_FILE}"
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_RIGHT
+!define MUI_HEADERIMAGE_BITMAP "..\assets\installer-header.bmp"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "..\assets\installer-welcome.bmp"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\NCM Batch MP3.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "运行 NCM 批量转 MP3"
 

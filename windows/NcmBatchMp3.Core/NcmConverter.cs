@@ -11,7 +11,7 @@ public sealed class NcmConverter
     private static readonly byte[] Magic = Encoding.ASCII.GetBytes("CTENFDAM");
     private static readonly byte[] CoreKey = Convert.FromHexString("687A4852416D736F356B496E62617857");
     private static readonly byte[] MetadataKey = Convert.FromHexString("2331346C6A6B5F215C5D2630553C2728");
-    private const int ChunkSize = 1024 * 1024;
+    private const int ChunkSize = 4 * 1024 * 1024;
     private const int MaxCoverBytes = 32 * 1024 * 1024;
     private const int MaxHeaderBytes = 16 * 1024 * 1024;
 
