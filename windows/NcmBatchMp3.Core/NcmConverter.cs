@@ -1,5 +1,7 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -27,10 +29,11 @@ public sealed class NcmConverter
         cancellationToken.ThrowIfCancellationRequested();
 
         Directory.CreateDirectory(options.OutputDirectory);
-        var extraction = await ExtractAsync(inputPath, cancellationToken, progress).ConfigureAwait(false);
+        var extraction = await ExtractAsync(inputPath, options.OutputDirectory, cancellationToken, progress).ConfigureAwait(false);
 
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (extraction.SourceFormat == "unknown")
             {
                 throw new InvalidDataException("解密后的音频头无法识别，已停止，避免生成打不开的伪 MP3");
@@ -93,7 +96,7 @@ public sealed class NcmConverter
                 stem,
                 extension,
                 options.OverwriteExisting);
-            MoveReplacing(extraction.AudioPath, outputPath, options.OverwriteExisting);
+            MoveReplacing(extraction.AudioPath, outputPath, options.OverwriteExisting, cancellationToken);
             progress?.Report(new ConversionProgress("done", 1));
 
             var message = extraction.SourceFormat == "mp3"
@@ -134,6 +137,7 @@ public sealed class NcmConverter
 
     private static async Task<ExtractionResult> ExtractAsync(
         string inputPath,
+        string outputDirectory,
         CancellationToken cancellationToken,
         IProgress<ConversionProgress>? progress)
     {
@@ -143,10 +147,11 @@ public sealed class NcmConverter
             throw new FileNotFoundException("找不到 NCM 文件", inputPath);
         }
 
-        var tempDirectory = Path.Combine(Path.GetTempPath(), $"ncm-batch-mp3-{Guid.NewGuid():N}");
+        var tempDirectory = Path.Combine(outputDirectory, $".ncm-work-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDirectory);
         var audioPath = Path.Combine(tempDirectory, $"{Guid.NewGuid():N}.audio");
 
+        byte[]? buffer = null;
         try
         {
             await using var input = new FileStream(
@@ -154,22 +159,24 @@ public sealed class NcmConverter
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read,
-                ChunkSize,
+                64 * 1024,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             await using var output = new FileStream(
                 audioPath,
                 FileMode.CreateNew,
                 FileAccess.Write,
                 FileShare.None,
-                ChunkSize,
+                64 * 1024,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
 
             var cursor = new BinaryCursor(input);
             var header = await ReadHeaderAsync(cursor, fileInfo.Length, cancellationToken).ConfigureAwait(false);
+            var mask = BuildAudioMask(header.KeyBox);
             var totalAudioBytes = Math.Max(1, fileInfo.Length - header.AudioOffset);
             var audioOffset = 0L;
             using var firstBytes = new MemoryStream(64);
-            var buffer = new byte[ChunkSize];
+            buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
+            var lastProgress = Stopwatch.GetTimestamp();
 
             while (cursor.Position < fileInfo.Length)
             {
@@ -177,7 +184,8 @@ public sealed class NcmConverter
                 var remaining = fileInfo.Length - cursor.Position;
                 var length = (int)Math.Min(buffer.Length, remaining);
                 await cursor.ReadExactlyAsync(buffer.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
-                DecryptAudioChunk(buffer.AsSpan(0, length), header.KeyBox, audioOffset);
+                ApplyAudioMask(buffer.AsSpan(0, length), mask, audioOffset);
+                cancellationToken.ThrowIfCancellationRequested();
 
                 if (firstBytes.Length < 64)
                 {
@@ -187,9 +195,12 @@ public sealed class NcmConverter
 
                 await output.WriteAsync(buffer.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
                 audioOffset += length;
-                progress?.Report(new ConversionProgress(
-                    "extract",
-                    Math.Min(0.86, audioOffset / (double)totalAudioBytes * 0.86)));
+                if (cursor.Position == fileInfo.Length || Stopwatch.GetElapsedTime(lastProgress).TotalMilliseconds >= 80)
+                {
+                    progress?.Report(new ConversionProgress(
+                        "extract", Math.Min(0.86, audioOffset / (double)totalAudioBytes * 0.86)));
+                    lastProgress = Stopwatch.GetTimestamp();
+                }
             }
 
             await output.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -206,6 +217,10 @@ public sealed class NcmConverter
         {
             TryDeleteDirectory(tempDirectory);
             throw;
+        }
+        finally
+        {
+            if (buffer is not null) ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
@@ -412,16 +427,44 @@ public sealed class NcmConverter
         return string.Empty;
     }
 
-    private static void DecryptAudioChunk(Span<byte> chunk, byte[] keyBox, long absoluteOffset)
+    internal static byte[] BuildAudioMask(byte[] keyBox)
     {
-        for (var index = 0; index < chunk.Length; index++)
+        var mask = new byte[256];
+        for (var index = 0; index < mask.Length; index++)
         {
-            var position = absoluteOffset + index;
-            var j = (int)((position + 1) & 0xff);
+            var j = (index + 1) & 0xff;
             var first = keyBox[j];
             var secondIndex = (first + j) & 0xff;
             var maskIndex = (first + keyBox[secondIndex]) & 0xff;
-            chunk[index] ^= keyBox[maskIndex];
+            mask[index] = keyBox[maskIndex];
+        }
+        return mask;
+    }
+
+    internal static void ApplyAudioMask(Span<byte> chunk, byte[] mask, long absoluteOffset)
+    {
+        var phase = (int)(absoluteOffset & 255);
+        var index = 0;
+        var width = Vector<byte>.Count;
+        if (Vector.IsHardwareAccelerated && 256 % width == 0)
+        {
+            while (index < chunk.Length && phase % width != 0)
+            {
+                chunk[index++] ^= mask[phase];
+                phase = (phase + 1) & 255;
+            }
+            while (index + width <= chunk.Length)
+            {
+                var value = new Vector<byte>(chunk[index..]) ^ new Vector<byte>(mask.AsSpan(phase));
+                value.CopyTo(chunk[index..]);
+                index += width;
+                phase = (phase + width) & 255;
+            }
+        }
+        while (index < chunk.Length)
+        {
+            chunk[index++] ^= mask[phase];
+            phase = (phase + 1) & 255;
         }
     }
 
@@ -536,7 +579,7 @@ public sealed class NcmConverter
 
         foreach (var character in value)
         {
-            var output = invalid.Contains(character) ? '_' : character;
+            var output = invalid.Contains(character) || (char.IsControl(character) && !char.IsWhiteSpace(character)) ? '_' : character;
             if (char.IsWhiteSpace(output))
             {
                 if (!previousWhitespace)
@@ -552,13 +595,31 @@ public sealed class NcmConverter
             }
         }
 
-        var cleaned = builder.ToString().Trim();
+        var cleaned = builder.ToString().Trim().TrimEnd('.');
         if (cleaned.Length == 0)
         {
             cleaned = "converted";
         }
 
-        return cleaned[..Math.Min(180, cleaned.Length)];
+        // Limit UTF-8 bytes too, so exports also work on external/shared disks.
+        var result = new StringBuilder();
+        var bytes = 0;
+        foreach (var rune in cleaned.EnumerateRunes())
+        {
+            if (bytes + rune.Utf8SequenceLength > 180) break;
+            result.Append(rune.ToString());
+            bytes += rune.Utf8SequenceLength;
+        }
+        cleaned = result.ToString().TrimEnd(' ', '.');
+        if (cleaned.Length == 0) return "converted";
+        var baseName = cleaned.Split('.')[0].TrimEnd().ToUpperInvariant();
+        if (baseName is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$"
+            || (baseName.Length == 4 && (baseName.StartsWith("COM") || baseName.StartsWith("LPT"))
+                && "123456789\u00b9\u00b2\u00b3".Contains(baseName[3])))
+        {
+            cleaned = "_" + cleaned;
+        }
+        return cleaned;
     }
 
     private static string UniqueOutputPath(
@@ -586,13 +647,15 @@ public sealed class NcmConverter
         throw new IOException($"输出目录里重名文件太多：{Path.GetFileName(desired)}");
     }
 
-    private static void MoveReplacing(string source, string target, bool overwrite)
+    private static void MoveReplacing(string source, string target, bool overwrite, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         var staged = StagingOutputPath(target);
         try
         {
-            File.Copy(source, staged);
+            File.Move(source, staged);
+            cancellationToken.ThrowIfCancellationRequested();
             CommitStagedOutput(staged, target, overwrite);
         }
         finally
@@ -604,9 +667,8 @@ public sealed class NcmConverter
     private static string StagingOutputPath(string target)
     {
         var directory = Path.GetDirectoryName(target)!;
-        var name = Path.GetFileNameWithoutExtension(target);
         var extension = Path.GetExtension(target);
-        return Path.Combine(directory, $".{name}.ncm-batch-{Guid.NewGuid():N}{extension}");
+        return Path.Combine(directory, $".ncm-batch-{Guid.NewGuid():N}{extension}");
     }
 
     private static void CommitStagedOutput(string staged, string target, bool overwrite)
@@ -651,7 +713,7 @@ public sealed class NcmConverter
                         cancellationToken)
                     .ConfigureAwait(false);
             }
-            catch when (embeddedCover)
+            catch when (embeddedCover && !cancellationToken.IsCancellationRequested)
             {
                 TryDeleteFile(staged);
                 embeddedCover = false;
@@ -666,6 +728,7 @@ public sealed class NcmConverter
                     .ConfigureAwait(false);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             CommitStagedOutput(staged, targetPath, overwrite);
             return embeddedCover;
         }
@@ -684,6 +747,7 @@ public sealed class NcmConverter
         bool copyAudio,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var startInfo = new ProcessStartInfo(ffmpegPath)
         {
             UseShellExecute = false,
@@ -693,7 +757,7 @@ public sealed class NcmConverter
         };
         var arguments = new List<string>
         {
-            "-hide_banner", "-loglevel", "error", "-y", "-i", inputPath
+            "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", inputPath
         };
         if (!string.IsNullOrWhiteSpace(coverPath))
         {
@@ -761,11 +825,13 @@ public sealed class NcmConverter
             }
         });
 
-        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        // Wait for the killed child and both pipes before deleting its temporary files.
+        var stderrTask = ReadProcessOutputAsync(process.StandardError);
+        var stdoutTask = ReadProcessOutputAsync(process.StandardOutput);
+        await process.WaitForExitAsync().ConfigureAwait(false);
         var stderr = await stderrTask.ConfigureAwait(false);
         _ = await stdoutTask.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (process.ExitCode != 0)
         {
@@ -773,6 +839,18 @@ public sealed class NcmConverter
                 ? $"ffmpeg 退出码 {process.ExitCode}"
                 : stderr.Trim());
         }
+    }
+
+    private static async Task<string> ReadProcessOutputAsync(StreamReader reader)
+    {
+        var result = new StringBuilder();
+        var buffer = new char[4096];
+        int count;
+        while ((count = await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false)) > 0)
+        {
+            result.Append(buffer, 0, Math.Min(count, 1024 * 1024 - result.Length));
+        }
+        return result.ToString();
     }
 
     private static void TryDeleteDirectory(string path)

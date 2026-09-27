@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CommonCrypto
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
@@ -23,6 +24,7 @@ enum ConversionStatus: String, Sendable {
     case running
     case finished
     case failed
+    case cancelled
 
     var title: String {
         switch self {
@@ -30,6 +32,7 @@ enum ConversionStatus: String, Sendable {
         case .running: return "转换中"
         case .finished: return "完成"
         case .failed: return "失败"
+        case .cancelled: return "已取消"
         }
     }
 
@@ -39,6 +42,7 @@ enum ConversionStatus: String, Sendable {
         case .running: return "arrow.triangle.2.circlepath"
         case .finished: return "checkmark.circle.fill"
         case .failed: return "xmark.octagon.fill"
+        case .cancelled: return "stop.circle"
         }
     }
 
@@ -48,6 +52,7 @@ enum ConversionStatus: String, Sendable {
         case .running: return .blue
         case .finished: return .green
         case .failed: return .red
+        case .cancelled: return .secondary
         }
     }
 }
@@ -117,7 +122,7 @@ private final class ProcessDataBox: @unchecked Sendable {
 
     func append(_ chunk: Data) {
         lock.lock()
-        data.append(chunk)
+        data.append(chunk.prefix(max(0, 1024 * 1024 - data.count)))
         lock.unlock()
     }
 
@@ -129,7 +134,8 @@ private final class ProcessDataBox: @unchecked Sendable {
 }
 
 enum ProcessRunner {
-    static func run(_ executable: String, arguments: [String], input: Data? = nil) throws -> ProcessResult {
+    static func run(_ executable: String, arguments: [String], input: Data? = nil, cancellation: CancellationToken? = nil) throws -> ProcessResult {
+        try cancellation?.checkCancellation()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -146,6 +152,7 @@ enum ProcessRunner {
             inputPipe = pipe
         } else {
             inputPipe = nil
+            process.standardInput = FileHandle.nullDevice
         }
 
         let stdout = ProcessDataBox()
@@ -155,12 +162,21 @@ enum ProcessRunner {
         func drain(_ handle: FileHandle, into box: ProcessDataBox) {
             ioGroup.enter()
             DispatchQueue.global(qos: .userInitiated).async {
-                box.append(handle.readDataToEndOfFile())
-                ioGroup.leave()
+                defer {
+                    try? handle.close()
+                    ioGroup.leave()
+                }
+                while true {
+                    let chunk = handle.readData(ofLength: 64 * 1024)
+                    if chunk.isEmpty { break }
+                    box.append(chunk)
+                }
             }
         }
 
         try process.run()
+        cancellation?.attach(process)
+        defer { cancellation?.detachProcess() }
         drain(outputPipe.fileHandleForReading, into: stdout)
         drain(errorPipe.fileHandleForReading, into: stderr)
         if let input, let inputPipe {
@@ -175,6 +191,7 @@ enum ProcessRunner {
         }
         process.waitUntilExit()
         ioGroup.wait()
+        try cancellation?.checkCancellation()
 
         return ProcessResult(stdout: stdout.value(), stderr: stderr.value(), status: process.terminationStatus)
     }
@@ -257,7 +274,6 @@ enum NCMConverterCore {
     static let magic = Data("CTENFDAM".utf8)
     static let coreKey = Data(hexString: "687A4852416D736F356B496E62617857")
     static let metaKey = Data(hexString: "2331346C6A6B5F215C5D2630553C2728")
-    static let opensslPath = "/usr/bin/openssl"
     static let chunkSize = 4 * 1024 * 1024
     static let maxCoverBytes = 32 * 1024 * 1024
     static let maxHeaderBytes = 16 * 1024 * 1024
@@ -268,17 +284,19 @@ enum NCMConverterCore {
         let coverData: Data?
     }
 
-    static func convertOne(inputURL: URL, options: ConversionOptions) throws -> ConversionResult {
+    static func convertOne(inputURL: URL, options: ConversionOptions, cancellation: CancellationToken? = nil) throws -> ConversionResult {
+        try cancellation?.checkCancellation()
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: options.outputDirectory, withIntermediateDirectories: true)
 
-        let tempDirectory = fileManager.temporaryDirectory
-            .appendingPathComponent("ncm-swift-\(UUID().uuidString)", isDirectory: true)
+        let tempDirectory = options.outputDirectory
+            .appendingPathComponent(".ncm-work-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: tempDirectory) }
 
         let tempAudioURL = tempDirectory.appendingPathComponent("audio.bin")
-        let extraction = try extractNCM(inputURL: inputURL, outputURL: tempAudioURL)
+        let extraction = try extractNCM(inputURL: inputURL, outputURL: tempAudioURL, cancellation: cancellation)
+        try cancellation?.checkCancellation()
         if extraction.sourceFormat == "unknown" {
             throw NCMConversionError.output("解密后的音频头无法识别，已停止输出，避免生成无法播放的文件")
         }
@@ -295,12 +313,13 @@ enum NCMConverterCore {
                     ffmpegPath: ffmpeg,
                     metadata: extraction.metadata,
                     coverURL: coverURL,
-                    copyAudio: true
+                    copyAudio: true,
+                    cancellation: cancellation
                 )
                 let message = embeddedCover ? "已导出 MP3（含封面）" : "已导出 MP3（封面无效，已跳过）"
                 return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: "mp3", transcoded: false, message: message)
             }
-            try moveReplacingIfNeeded(from: tempAudioURL, to: target, overwrite: options.overwriteExisting)
+            try moveReplacingIfNeeded(from: tempAudioURL, to: target, overwrite: options.overwriteExisting, cancellation: cancellation)
             return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: extraction.sourceFormat, transcoded: false, message: "已导出原始音频")
         }
 
@@ -314,12 +333,13 @@ enum NCMConverterCore {
                     ffmpegPath: ffmpeg,
                     metadata: extraction.metadata,
                     coverURL: coverURL,
-                    copyAudio: true
+                    copyAudio: true,
+                    cancellation: cancellation
                 )
                 let message = embeddedCover ? "已转换为 MP3（含封面）" : "已转换为 MP3（封面无效，已跳过）"
                 return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: "mp3", transcoded: false, message: message)
             }
-            try moveReplacingIfNeeded(from: tempAudioURL, to: target, overwrite: options.overwriteExisting)
+            try moveReplacingIfNeeded(from: tempAudioURL, to: target, overwrite: options.overwriteExisting, cancellation: cancellation)
             return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: "mp3", transcoded: false, message: "已转换为 MP3")
         }
 
@@ -332,14 +352,15 @@ enum NCMConverterCore {
                 ffmpegPath: ffmpeg,
                 metadata: extraction.metadata,
                 coverURL: coverURL,
-                copyAudio: false
+                copyAudio: false,
+                cancellation: cancellation
             )
             let suffix = coverURL != nil && !embeddedCover ? "（封面无效，已跳过）" : ""
             return ConversionResult(inputURL: inputURL, outputURL: target, sourceFormat: extraction.sourceFormat, transcoded: true, message: "已从 \(extraction.sourceFormat.uppercased()) 转码为 MP3\(suffix)")
         }
 
         let target = try uniqueURL(options.outputDirectory.appendingPathComponent(stem).appendingPathExtension(extraction.sourceFormat), overwrite: options.overwriteExisting)
-        try moveReplacingIfNeeded(from: tempAudioURL, to: target, overwrite: options.overwriteExisting)
+        try moveReplacingIfNeeded(from: tempAudioURL, to: target, overwrite: options.overwriteExisting, cancellation: cancellation)
         return ConversionResult(
             inputURL: inputURL,
             outputURL: target,
@@ -349,10 +370,12 @@ enum NCMConverterCore {
         )
     }
 
-    static func extractNCM(inputURL: URL, outputURL: URL) throws -> (metadata: [String: Any], sourceFormat: String, coverData: Data?) {
+    static func extractNCM(inputURL: URL, outputURL: URL, cancellation: CancellationToken? = nil) throws -> (metadata: [String: Any], sourceFormat: String, coverData: Data?) {
+        try cancellation?.checkCancellation()
         let reader = try BinaryReader(url: inputURL)
         let fileSize = try FileManager.default.attributesOfItem(atPath: inputURL.path)[.size] as? UInt64 ?? 0
         let header = try readHeader(reader: reader, fileSize: fileSize)
+        let mask = audioMask(keyBox: header.keyBox)
 
         FileManager.default.createFile(atPath: outputURL.path, contents: nil)
         let outputHandle = try FileHandle(forWritingTo: outputURL)
@@ -361,22 +384,17 @@ enum NCMConverterCore {
         var offset = 0
         var firstBytes = Data()
 
-        while let chunk = try reader.readChunk(maxLength: chunkSize), !chunk.isEmpty {
-            var bytes = [UInt8](chunk)
-            for index in bytes.indices {
-                let position = offset + index
-                let j = (position + 1) & 0xFF
-                let first = Int(header.keyBox[j])
-                let secondIndex = (first + j) & 0xFF
-                let maskIndex = (first + Int(header.keyBox[secondIndex])) & 0xFF
-                bytes[index] ^= header.keyBox[maskIndex]
-            }
+        while true {
+            try cancellation?.checkCancellation()
+            guard var chunk = try reader.readChunk(maxLength: chunkSize), !chunk.isEmpty else { break }
+            applyAudioMask(&chunk, mask: mask, offset: offset)
 
             if firstBytes.isEmpty {
-                firstBytes = Data(bytes.prefix(64))
+                firstBytes = Data(chunk.prefix(64))
             }
-            try outputHandle.write(contentsOf: Data(bytes))
-            offset += bytes.count
+            try cancellation?.checkCancellation()
+            try outputHandle.write(contentsOf: chunk)
+            offset += chunk.count
         }
 
         return (header.metadata, sniffAudioFormat(firstBytes: firstBytes, metadata: header.metadata), header.coverData)
@@ -457,50 +475,73 @@ enum NCMConverterCore {
     }
 
     static func aes128ECBDecrypt(_ data: Data, key: Data) throws -> Data {
-        guard FileManager.default.fileExists(atPath: opensslPath) else {
-            throw NCMConversionError.crypto("找不到系统 openssl，无法解密 NCM 头部")
-        }
-        guard data.count % 16 == 0 else {
+        guard !data.isEmpty, data.count % 16 == 0 else {
             throw NCMConversionError.crypto("AES 数据长度异常")
         }
-        let result = try ProcessRunner.run(
-            opensslPath,
-            arguments: ["enc", "-d", "-aes-128-ecb", "-K", key.hexString, "-nosalt", "-nopad"],
-            input: data
-        )
-        guard result.status == 0 else {
-            let detail = String(data: result.stderr, encoding: .utf8) ?? "\(result.status)"
-            throw NCMConversionError.crypto("openssl AES 解密失败：\(detail.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-        return try pkcs7Unpad(result.stdout)
+        return try aes128ECB(data, key: key, operation: CCOperation(kCCDecrypt))
     }
 
     static func aes128ECBEncryptPKCS7(_ data: Data, key: Data) throws -> Data {
-        let result = try ProcessRunner.run(
-            opensslPath,
-            arguments: ["enc", "-e", "-aes-128-ecb", "-K", key.hexString, "-nosalt"],
-            input: data
-        )
-        guard result.status == 0 else {
-            let detail = String(data: result.stderr, encoding: .utf8) ?? "\(result.status)"
-            throw NCMConversionError.crypto("openssl AES 加密失败：\(detail.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-        return result.stdout
+        try aes128ECB(data, key: key, operation: CCOperation(kCCEncrypt))
     }
 
-    static func pkcs7Unpad(_ data: Data) throws -> Data {
-        guard let last = data.last else {
-            throw NCMConversionError.crypto("AES 解密结果为空")
+    private static func aes128ECB(_ data: Data, key: Data, operation: CCOperation) throws -> Data {
+        guard key.count == kCCKeySizeAES128 else { throw NCMConversionError.crypto("AES 密钥长度异常") }
+        let capacity = data.count + kCCBlockSizeAES128
+        var output = Data(count: capacity)
+        var written = 0
+        let status = output.withUnsafeMutableBytes { outputBytes in
+            data.withUnsafeBytes { inputBytes in
+                key.withUnsafeBytes { keyBytes in
+                    CCCrypt(operation, CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionECBMode | kCCOptionPKCS7Padding),
+                            keyBytes.baseAddress, key.count, nil, inputBytes.baseAddress, data.count,
+                            outputBytes.baseAddress, capacity, &written)
+                }
+            }
         }
-        let pad = Int(last)
-        guard pad >= 1, pad <= 16, data.count >= pad else {
+        guard status == kCCSuccess else {
             throw NCMConversionError.crypto("AES 填充校验失败，文件可能不是有效 NCM")
         }
-        let suffix = data.suffix(pad)
-        guard suffix.allSatisfy({ $0 == last }) else {
-            throw NCMConversionError.crypto("AES 填充校验失败，文件可能不是有效 NCM")
+        output.removeSubrange(written..<output.count)
+        return output
+    }
+
+    static func audioMask(keyBox: [UInt8]) -> [UInt8] {
+        // The NCM stream mask repeats every 256 bytes and never mutates the key box.
+        (0..<256).map { position in
+            let j = (position + 1) & 255
+            let first = Int(keyBox[j])
+            return keyBox[(first + Int(keyBox[(first + j) & 255])) & 255]
         }
-        return Data(data.dropLast(pad))
+    }
+
+    static func applyAudioMask(_ data: inout Data, mask: [UInt8], offset: Int) {
+        precondition(mask.count == 256)
+        data.withUnsafeMutableBytes { bytes in
+            mask.withUnsafeBytes { key in
+                var index = 0
+                var phase = offset & 255
+                while index < bytes.count && phase & 15 != 0 {
+                    bytes[index] ^= key[phase]
+                    index += 1
+                    phase = (phase + 1) & 255
+                }
+                while index + 16 <= bytes.count {
+                    let value = bytes.loadUnaligned(fromByteOffset: index, as: SIMD16<UInt8>.self)
+                    let keyValue = key.loadUnaligned(fromByteOffset: phase, as: SIMD16<UInt8>.self)
+                    Swift.withUnsafeBytes(of: value ^ keyValue) { transformed in
+                        bytes.baseAddress!.advanced(by: index).copyMemory(from: transformed.baseAddress!, byteCount: 16)
+                    }
+                    index += 16
+                    phase = (phase + 16) & 255
+                }
+                while index < bytes.count {
+                    bytes[index] ^= key[phase]
+                    index += 1
+                    phase = (phase + 1) & 255
+                }
+            }
+        }
     }
 
     static func parseMetadata(_ raw: Data) throws -> [String: Any] {
@@ -662,13 +703,20 @@ enum NCMConverterCore {
     }
 
     static func safeFilename(_ name: String) -> String {
-        let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|")
+        let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters.subtracting(.whitespacesAndNewlines))
         let parts = name.unicodeScalars.map { invalid.contains($0) ? "_" : Character($0) }
         let cleaned = String(parts).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        if cleaned.isEmpty {
-            return "converted"
+        var result = ""
+        var byteCount = 0
+        // Leave room for the extension and collision suffix on 255-byte filesystems.
+        for character in cleaned {
+            let length = String(character).utf8.count
+            if byteCount + length > 180 { break }
+            result.append(character)
+            byteCount += length
         }
-        return String(cleaned.prefix(180))
+        result = result.trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        return result.isEmpty ? "converted" : result
     }
 
     static func uniqueURL(_ desired: URL, overwrite: Bool) throws -> URL {
@@ -689,16 +737,17 @@ enum NCMConverterCore {
         throw NCMConversionError.output("输出目录里重名文件太多：\(desired.lastPathComponent)")
     }
 
-    static func moveReplacingIfNeeded(from source: URL, to target: URL, overwrite: Bool) throws {
+    static func moveReplacingIfNeeded(from source: URL, to target: URL, overwrite: Bool, cancellation: CancellationToken? = nil) throws {
+        try cancellation?.checkCancellation()
         let staged = stagingURL(for: target)
         defer { try? FileManager.default.removeItem(at: staged) }
-        try FileManager.default.copyItem(at: source, to: staged)
+        try FileManager.default.moveItem(at: source, to: staged)
+        try cancellation?.checkCancellation()
         try commitStagedOutput(from: staged, to: target, overwrite: overwrite)
     }
 
     static func stagingURL(for target: URL) -> URL {
-        let base = target.deletingPathExtension().lastPathComponent
-        let name = ".\(base).ncm-batch-\(UUID().uuidString)"
+        let name = ".ncm-batch-\(UUID().uuidString)"
         return target.deletingLastPathComponent().appendingPathComponent(name).appendingPathExtension(target.pathExtension)
     }
 
@@ -754,7 +803,8 @@ enum NCMConverterCore {
         ffmpegPath: String,
         metadata: [String: Any],
         coverURL: URL?,
-        copyAudio: Bool
+        copyAudio: Bool,
+        cancellation: CancellationToken? = nil
     ) throws -> Bool {
         let stagedURL = stagingURL(for: targetURL)
         defer { try? FileManager.default.removeItem(at: stagedURL) }
@@ -767,9 +817,10 @@ enum NCMConverterCore {
                 ffmpegPath: ffmpegPath,
                 metadata: metadata,
                 coverURL: coverURL,
-                copyAudio: copyAudio
+                copyAudio: copyAudio,
+                cancellation: cancellation
             )
-        } catch where coverURL != nil {
+        } catch where coverURL != nil && !(error is CancellationError) {
             try? FileManager.default.removeItem(at: stagedURL)
             embeddedCover = false
             try transcodeToMP3(
@@ -778,10 +829,12 @@ enum NCMConverterCore {
                 ffmpegPath: ffmpegPath,
                 metadata: metadata,
                 coverURL: nil,
-                copyAudio: copyAudio
+                copyAudio: copyAudio,
+                cancellation: cancellation
             )
         }
 
+        try cancellation?.checkCancellation()
         try commitStagedOutput(from: stagedURL, to: targetURL, overwrite: overwrite)
         return embeddedCover
     }
@@ -792,10 +845,12 @@ enum NCMConverterCore {
         ffmpegPath: String,
         metadata: [String: Any],
         coverURL: URL?,
-        copyAudio: Bool
+        copyAudio: Bool,
+        cancellation: CancellationToken? = nil
     ) throws {
         var arguments = [
             "-hide_banner",
+            "-nostdin",
             "-loglevel", "error",
             "-y",
             "-i", inputURL.path
@@ -833,7 +888,8 @@ enum NCMConverterCore {
 
         let result = try ProcessRunner.run(
             ffmpegPath,
-            arguments: arguments
+            arguments: arguments,
+            cancellation: cancellation
         )
         guard result.status == 0 else {
             let detail = String(data: result.stderr, encoding: .utf8) ?? "\(result.status)"
@@ -857,6 +913,7 @@ enum NCMConverterCore {
 final class CancellationToken: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelledValue = false
+    private var process: Process?
 
     var isCancelled: Bool {
         lock.lock()
@@ -866,8 +923,26 @@ final class CancellationToken: @unchecked Sendable {
 
     func cancel() {
         lock.lock()
+        defer { lock.unlock() }
         cancelledValue = true
-        lock.unlock()
+        if let process, process.isRunning { process.terminate() }
+    }
+
+    func checkCancellation() throws {
+        if isCancelled { throw CancellationError() }
+    }
+
+    func attach(_ process: Process) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.process = process
+        if cancelledValue && process.isRunning { process.terminate() }
+    }
+
+    func detachProcess() {
+        lock.lock()
+        defer { lock.unlock() }
+        process = nil
     }
 }
 
@@ -984,6 +1059,9 @@ final class AppModel: ObservableObject {
     @Published var overwriteExisting = false
     @Published var recursiveFolderSearch = true
     @Published var isConverting = false
+    @Published private(set) var pendingImports = 0
+    @Published private(set) var finishedCount = 0
+    @Published private(set) var failedCount = 0
     @Published var completedCount = 0
     @Published var logLines: [String] = []
     @Published var isDropTargeted = false
@@ -991,6 +1069,14 @@ final class AppModel: ObservableObject {
     @Published var isEasterEggPresented = false
 
     private var currentToken: CancellationToken?
+    private var importToken = CancellationToken()
+    private let importQueue = DispatchQueue(label: "ncm.file-import", qos: .userInitiated)
+    private var conversionIndices: [URL: Int] = [:]
+    private let logFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
     private var updateCheckInProgress = false
     private var automaticUpdateCheckFinished = false
 
@@ -1015,14 +1101,6 @@ final class AppModel: ObservableObject {
 
     var runningCount: Int {
         items.filter { $0.status == .running }.count
-    }
-
-    var finishedCount: Int {
-        items.filter { $0.status == .finished }.count
-    }
-
-    var failedCount: Int {
-        items.filter { $0.status == .failed }.count
     }
 
     var easterEggMessage: String {
@@ -1103,26 +1181,33 @@ final class AppModel: ObservableObject {
     }
 
     func addURLs(_ urls: [URL]) {
+        guard !isConverting else { return }
         let recursive = recursiveFolderSearch
+        let token = importToken
+        pendingImports += 1
         appendLog("正在读取文件…")
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, urls] in
-            let discovered = Self.collectNCMFiles(from: urls, recursive: recursive)
+        importQueue.async { [weak self, urls, token] in
+            let discovered = Self.collectNCMFiles(from: urls, recursive: recursive, cancellation: token)
             DispatchQueue.main.async {
-                self?.appendDiscoveredURLs(discovered)
+                guard let self, self.importToken === token else { return }
+                self.pendingImports -= 1
+                self.appendDiscoveredURLs(discovered)
             }
         }
     }
 
-    private func appendDiscoveredURLs(_ discovered: [URL]) {
-        let existing = Set(items.map { $0.url.standardizedFileURL })
-        var added = 0
+    func appendDiscoveredURLs(_ discovered: [URL]) {
+        guard !isConverting else { return }
+        var existing = Set(items.map { $0.url.standardizedFileURL })
+        var additions: [QueueItem] = []
         for url in discovered {
             let normalized = url.standardizedFileURL
-            if !existing.contains(normalized), !items.contains(where: { $0.url.standardizedFileURL == normalized }) {
-                items.append(QueueItem(url: normalized))
-                added += 1
+            if existing.insert(normalized).inserted {
+                additions.append(QueueItem(url: normalized))
             }
         }
+        items.append(contentsOf: additions)
+        let added = additions.count
         if added > 0 {
             appendLog("已添加 \(added) 个文件")
         } else {
@@ -1134,11 +1219,12 @@ final class AppModel: ObservableObject {
         Self.collectNCMFiles(from: urls, recursive: recursiveFolderSearch)
     }
 
-    nonisolated private static func collectNCMFiles(from urls: [URL], recursive: Bool) -> [URL] {
+    nonisolated private static func collectNCMFiles(from urls: [URL], recursive: Bool, cancellation: CancellationToken? = nil) -> [URL] {
         let fileManager = FileManager.default
         var result: [URL] = []
 
         for url in urls {
+            if cancellation?.isCancelled == true { return [] }
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
                 continue
@@ -1148,7 +1234,9 @@ final class AppModel: ObservableObject {
                 if recursive {
                     let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey]
                     if let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles, .skipsPackageDescendants]) {
-                        for case let fileURL as URL in enumerator where fileURL.pathExtension.lowercased() == "ncm" {
+                        for case let fileURL as URL in enumerator {
+                            if cancellation?.isCancelled == true { return [] }
+                            guard fileURL.pathExtension.lowercased() == "ncm" else { continue }
                             if (try? fileURL.resourceValues(forKeys: keys).isRegularFile) == true {
                                 result.append(fileURL)
                             }
@@ -1170,32 +1258,47 @@ final class AppModel: ObservableObject {
     }
 
     func removeSelected() {
-        guard !selection.isEmpty else { return }
+        guard !selection.isEmpty, !isConverting else { return }
         items.removeAll { selection.contains($0.id) }
         selection.removeAll()
+        finishedCount = items.filter { $0.status == .finished }.count
+        failedCount = items.filter { $0.status == .failed }.count
     }
 
     func clearQueue() {
+        guard !isConverting else { return }
+        importToken.cancel()
+        importToken = CancellationToken()
+        pendingImports = 0
         items.removeAll()
         selection.removeAll()
         completedCount = 0
+        finishedCount = 0
+        failedCount = 0
         logLines.removeAll()
     }
 
     func openOutputDirectory() {
-        NSWorkspace.shared.open(outputDirectory)
+        do {
+            try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(outputDirectory)
+        } catch { appendLog("无法打开输出目录：\(error.localizedDescription)") }
     }
 
     func cancelConversion() {
-        currentToken?.cancel()
-        appendLog("正在取消，当前文件处理完后停止")
+        guard let currentToken, !currentToken.isCancelled else { return }
+        currentToken.cancel()
+        appendLog("正在取消…")
     }
 
     func startConversion() {
-        guard !items.isEmpty, !isConverting else { return }
+        guard !items.isEmpty, !isConverting, pendingImports == 0 else { return }
 
         isConverting = true
         completedCount = 0
+        finishedCount = 0
+        failedCount = 0
+        conversionIndices = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.url, $0.offset) })
         currentToken = CancellationToken()
         let token = currentToken!
         let files = items.map(\.url)
@@ -1231,11 +1334,13 @@ final class AppModel: ObservableObject {
                 }
 
                 do {
-                    let result = try NCMConverterCore.convertOne(inputURL: file, options: options)
+                    let result = try NCMConverterCore.convertOne(inputURL: file, options: options, cancellation: token)
                     ok += 1
                     DispatchQueue.main.async {
                         self?.markFinished(result: result, completed: index + 1)
                     }
+                } catch is CancellationError {
+                    break
                 } catch {
                     failed += 1
                     let message = error.localizedDescription
@@ -1252,7 +1357,7 @@ final class AppModel: ObservableObject {
     }
 
     func markRunning(url: URL, index: Int, total: Int) {
-        if let itemIndex = items.firstIndex(where: { $0.url == url }) {
+        if let itemIndex = conversionIndices[url] {
             items[itemIndex].status = .running
             items[itemIndex].detail = "\(index + 1)/\(total)"
         }
@@ -1261,7 +1366,8 @@ final class AppModel: ObservableObject {
 
     func markFinished(result: ConversionResult, completed: Int) {
         completedCount = completed
-        if let itemIndex = items.firstIndex(where: { $0.url == result.inputURL }) {
+        finishedCount += 1
+        if let itemIndex = conversionIndices[result.inputURL] {
             items[itemIndex].status = .finished
             items[itemIndex].outputURL = result.outputURL
             items[itemIndex].detail = result.message
@@ -1271,7 +1377,8 @@ final class AppModel: ObservableObject {
 
     func markFailed(url: URL, message: String, completed: Int) {
         completedCount = completed
-        if let itemIndex = items.firstIndex(where: { $0.url == url }) {
+        failedCount += 1
+        if let itemIndex = conversionIndices[url] {
             items[itemIndex].status = .failed
             items[itemIndex].detail = message
         }
@@ -1281,7 +1388,12 @@ final class AppModel: ObservableObject {
     func finishConversion(ok: Int, failed: Int, cancelled: Bool) {
         isConverting = false
         currentToken = nil
+        conversionIndices.removeAll(keepingCapacity: true)
         if cancelled {
+            for index in items.indices where items[index].status == .running || items[index].status == .queued {
+                items[index].status = .cancelled
+                items[index].detail = "已取消"
+            }
             appendLog("已取消：成功 \(ok)，失败 \(failed)")
         } else {
             appendLog("完成：成功 \(ok)，失败 \(failed)")
@@ -1289,9 +1401,7 @@ final class AppModel: ObservableObject {
     }
 
     func appendLog(_ line: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        logLines.append("[\(formatter.string(from: Date()))] \(line)")
+        logLines.append("[\(logFormatter.string(from: Date()))] \(line)")
         if logLines.count > 1000 {
             logLines.removeFirst(logLines.count - 1000)
         }
@@ -1383,36 +1493,20 @@ struct LiquidBackground: View {
 struct AppMark: View {
     let size: CGFloat
 
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .fill(Color(red: 0.12, green: 0.12, blue: 0.11))
-                .overlay {
-                    RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                        .stroke(.white.opacity(0.18), lineWidth: 1)
-                }
-
-            Circle()
-                .fill(Color(red: 0.93, green: 0.91, blue: 0.87))
-                .frame(width: size * 0.54, height: size * 0.54)
-                .overlay {
-                    Circle()
-                        .stroke(.black.opacity(0.9), lineWidth: size * 0.038)
-                }
-
-            Image(systemName: "music.note")
-                .font(.system(size: size * 0.34, weight: .bold))
-                .foregroundStyle(.black)
-                .offset(x: -size * 0.02, y: -size * 0.02)
-
-            Image(systemName: "arrow.down")
-                .font(.system(size: size * 0.16, weight: .black))
-                .foregroundStyle(.black)
-                .padding(size * 0.08)
-                .background(Color(red: 0.93, green: 0.91, blue: 0.87), in: Circle())
-                .offset(x: size * 0.28, y: size * 0.27)
+    private static let artwork: NSImage = {
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let image = NSImage(contentsOf: url) {
+            return image
         }
-        .frame(width: size, height: size)
+        return NSImage(systemSymbolName: "music.note", accessibilityDescription: nil) ?? NSImage()
+    }()
+
+    var body: some View {
+        Image(nsImage: Self.artwork)
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 }
 
@@ -1596,7 +1690,7 @@ struct ContentView: View {
                 Image(systemName: "trash")
             }
             .liquidButton()
-            .disabled(model.items.isEmpty || model.isConverting)
+            .disabled((model.items.isEmpty && model.pendingImports == 0) || model.isConverting)
             .help("清空列表")
 
             Spacer()
@@ -1621,7 +1715,7 @@ struct ContentView: View {
                 }
                 .keyboardShortcut(.return, modifiers: .command)
                 .liquidButton(prominent: true)
-                .disabled(model.items.isEmpty)
+                .disabled(model.items.isEmpty || model.pendingImports > 0)
             }
         }
         .controlSize(.regular)
@@ -1971,6 +2065,7 @@ struct LogView: View {
     }
 }
 
+@MainActor
 enum CommandLineMode {
     static func handleIfNeeded() {
         let args = Array(CommandLine.arguments.dropFirst())
@@ -2053,6 +2148,7 @@ enum CommandLineMode {
     }
 }
 
+@MainActor
 enum SelfTest {
     static func run() throws {
         var calendar = Calendar(identifier: .gregorian)
@@ -2088,6 +2184,63 @@ enum SelfTest {
         guard actual == expectedAudio else {
             throw NCMConversionError.output("自测输出音频不一致")
         }
+        try testOptimizations(directory: tempDirectory, inputURL: inputURL)
+    }
+
+    static func testOptimizations(directory: URL, inputURL: URL) throws {
+        func require(_ condition: Bool, _ message: String) throws {
+            if !condition { throw NCMConversionError.output(message) }
+        }
+        let box = try NCMConverterCore.buildKeyBox(keyData: Data("independent-boundary-test".utf8))
+        let mask = NCMConverterCore.audioMask(keyBox: box)
+        let original = Data((0..<8192).map { UInt8(($0 * 17 + 13) & 255) })
+        let encrypted = NCMConverterCore.encryptAudioForTest(original, keyBox: box)
+        for offset in 0..<256 {
+            for count in [0, 1, 15, 16, 17, 255, 256, 257, 4099] {
+                var chunk = Data(encrypted[offset..<offset + count])
+                NCMConverterCore.applyAudioMask(&chunk, mask: mask, offset: offset)
+                try require(chunk == original.subdata(in: offset..<offset + count), "分块 SIMD 解密边界错误")
+            }
+        }
+        let longName = String(repeating: "音乐😀", count: 100)
+        let safe = NCMConverterCore.safeFilename(longName)
+        try require(safe.utf8.count <= 180 && !safe.isEmpty, "中文长文件名超出磁盘限制")
+        let longTarget = directory.appendingPathComponent(safe).appendingPathExtension("mp3")
+        try require(NCMConverterCore.stagingURL(for: longTarget).lastPathComponent.utf8.count < 255, "暂存文件名过长")
+
+        let token = CancellationToken()
+        token.cancel()
+        let cancelledOutput = directory.appendingPathComponent("cancelled-output")
+        do {
+            _ = try NCMConverterCore.convertOne(inputURL: inputURL, options: ConversionOptions(
+                outputDirectory: cancelledOutput, outputMode: .original, renameByMetadata: false, overwriteExisting: false
+            ), cancellation: token)
+            throw NCMConversionError.output("预先取消未生效")
+        } catch is CancellationError { }
+        try require(!FileManager.default.fileExists(atPath: cancelledOutput.path), "取消后创建了输出")
+
+        let processToken = CancellationToken()
+        let started = Date()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { processToken.cancel() }
+        do {
+            _ = try ProcessRunner.run("/bin/sleep", arguments: ["10"], cancellation: processToken)
+            throw NCMConversionError.output("运行中的进程未取消")
+        } catch is CancellationError { }
+        try require(Date().timeIntervalSince(started) < 3, "取消进程耗时过长")
+
+        let model = AppModel()
+        let urls = (0..<10000).map { directory.appendingPathComponent("\($0).ncm") }
+        model.appendDiscoveredURLs(urls + urls)
+        try require(model.items.count == 10000, "批量导入去重错误")
+        model.clearQueue()
+        model.addURLs([inputURL])
+        model.startConversion()
+        try require(!model.isConverting && model.pendingImports == 1, "扫描期间错误启动转换")
+        model.clearQueue()
+        let until = Date().addingTimeInterval(0.2)
+        while Date() < until { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        try require(model.items.isEmpty && model.pendingImports == 0, "清空后后台扫描重新填入队列")
+        print("SIMD boundaries, cancellation, long names and 10,000-file queue checks ok")
     }
 
     static func buildSyntheticNCM(at url: URL) throws -> Data {
@@ -2160,6 +2313,9 @@ struct NCMBatchMP3App: App {
                 .onOpenURL { url in
                     model.addURLs([url])
                 }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    model.cancelConversion()
+                }
         }
         .windowStyle(.titleBar)
         .commands {
@@ -2171,7 +2327,7 @@ struct NCMBatchMP3App: App {
                 Divider()
                 Button("开始转换") { model.startConversion() }
                     .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(model.items.isEmpty || model.isConverting)
+                    .disabled(model.items.isEmpty || model.isConverting || model.pendingImports > 0)
             }
         }
     }

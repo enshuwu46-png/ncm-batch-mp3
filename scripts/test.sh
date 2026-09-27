@@ -19,6 +19,7 @@ fi
 if [[ -n "$DOTNET_BIN" ]]; then
   DOTNET_CLI_HOME="$ROOT_DIR/.build/dotnet-home" \
   NUGET_PACKAGES="$ROOT_DIR/.build/nuget" \
+  NCM_TEST_FFMPEG="$ROOT_DIR/dist/NCM批量转MP3.app/Contents/Resources/ffmpeg" \
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
   "$DOTNET_BIN" run \
     --project "$ROOT_DIR/windows/NcmBatchMp3.Tests/NcmBatchMp3.Tests.csproj" \

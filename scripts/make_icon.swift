@@ -30,20 +30,6 @@ func rounded(_ rect: NSRect, _ radius: CGFloat) -> NSBezierPath {
     NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
 }
 
-func drawText(_ text: String, pixels: CGFloat, center: NSPoint, size: CGFloat, weight: NSFont.Weight, color: NSColor) {
-    guard pixels >= 64 else { return }
-    let string = text as NSString
-    let attrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.monospacedSystemFont(ofSize: size, weight: weight),
-        .foregroundColor: color
-    ]
-    let textSize = string.size(withAttributes: attrs)
-    string.draw(
-        at: NSPoint(x: center.x - textSize.width * 0.5, y: center.y - textSize.height * 0.5),
-        withAttributes: attrs
-    )
-}
-
 func drawArrow(from start: NSPoint, to end: NSPoint, width: CGFloat, color: NSColor) {
     color.setStroke()
     let path = NSBezierPath()
@@ -52,91 +38,107 @@ func drawArrow(from start: NSPoint, to end: NSPoint, width: CGFloat, color: NSCo
     path.lineJoinStyle = .round
     path.move(to: start)
     path.line(to: end)
+    let headSize = width * 1.8
+    path.move(to: NSPoint(x: end.x - headSize, y: end.y + headSize))
+    path.line(to: end)
+    path.line(to: NSPoint(x: end.x - headSize, y: end.y - headSize))
     path.stroke()
+}
+
+func drawNote(in disc: NSRect, color: NSColor) {
+    NSGraphicsContext.saveGraphicsState()
+    let transform = NSAffineTransform()
+    transform.translateX(by: disc.minX, yBy: disc.minY)
+    transform.scaleX(by: disc.width, yBy: disc.height)
+    transform.concat()
 
     color.setFill()
-    let head = NSBezierPath()
-    let headSize = width * 2.8
-    head.move(to: end)
-    head.line(to: NSPoint(x: end.x - headSize, y: end.y + headSize * 0.64))
-    head.line(to: NSPoint(x: end.x - headSize * 0.58, y: end.y))
-    head.line(to: NSPoint(x: end.x - headSize, y: end.y - headSize * 0.64))
-    head.close()
-    head.fill()
+    NSBezierPath(ovalIn: NSRect(x: 0.28, y: 0.23, width: 0.28, height: 0.19)).fill()
+    NSBezierPath(rect: NSRect(x: 0.48, y: 0.33, width: 0.08, height: 0.43)).fill()
+    let note = NSBezierPath()
+    note.move(to: NSPoint(x: 0.53, y: 0.76))
+    note.curve(to: NSPoint(x: 0.72, y: 0.58), controlPoint1: NSPoint(x: 0.55, y: 0.66), controlPoint2: NSPoint(x: 0.76, y: 0.69))
+    note.curve(to: NSPoint(x: 0.65, y: 0.49), controlPoint1: NSPoint(x: 0.73, y: 0.54), controlPoint2: NSPoint(x: 0.69, y: 0.51))
+    note.curve(to: NSPoint(x: 0.53, y: 0.63), controlPoint1: NSPoint(x: 0.69, y: 0.60), controlPoint2: NSPoint(x: 0.58, y: 0.60))
+    note.close()
+    note.fill()
+    NSGraphicsContext.restoreGraphicsState()
 }
 
 for variant in variants {
     let p = variant.pixels
-    let image = NSImage(size: NSSize(width: p, height: p))
-    image.lockFocus()
+    // lockFocus uses the display's backing scale; icon files need exact pixel sizes.
+    guard let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: Int(p), pixelsHigh: Int(p),
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+    ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+        fatalError("Could not create icon bitmap")
+    }
+    bitmap.size = NSSize(width: p, height: p)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    context.shouldAntialias = true
 
     let bounds = NSRect(x: 0, y: 0, width: p, height: p)
-    let outer = bounds.insetBy(dx: p * 0.035, dy: p * 0.035)
-    let outerPath = rounded(outer, p * 0.235)
+    context.cgContext.clear(bounds)
+    let outer = bounds.insetBy(dx: p * 0.045, dy: p * 0.045)
+    let outerPath = rounded(outer, p * 0.245)
 
-    c(0.12, 0.12, 0.11).setFill()
+    NSGraphicsContext.saveGraphicsState()
+    let shadow = NSShadow()
+    shadow.shadowColor = NSColor.black.withAlphaComponent(0.12)
+    shadow.shadowOffset = NSSize(width: 0, height: -p * 0.018)
+    shadow.shadowBlurRadius = p * 0.038
+    shadow.set()
+    c(0.98, 0.975, 0.955).setFill()
     outerPath.fill()
+    NSGraphicsContext.restoreGraphicsState()
 
-    c(1, 1, 1, 0.18).setStroke()
-    outerPath.lineWidth = max(1, p * 0.010)
+    c(0.10, 0.18, 0.20, 0.16).setStroke()
+    outerPath.lineWidth = max(0.5, p * 0.008)
     outerPath.stroke()
 
-    let discRect = NSRect(x: p * 0.16, y: p * 0.30, width: p * 0.38, height: p * 0.38)
-    c(0.93, 0.91, 0.87).setFill()
+    let discRect = NSRect(x: p * 0.12, y: p * 0.32, width: p * 0.36, height: p * 0.36)
+    c(0.79, 0.92, 0.93).setFill()
     NSBezierPath(ovalIn: discRect).fill()
-    c(0.02, 0.02, 0.02, 0.94).setStroke()
+    c(0.08, 0.20, 0.23, 0.72).setStroke()
     let discOutline = NSBezierPath(ovalIn: discRect)
-    discOutline.lineWidth = max(1, p * 0.014)
+    discOutline.lineWidth = max(0.6, p * 0.012)
     discOutline.stroke()
 
-    let center = NSRect(x: p * 0.29, y: p * 0.43, width: p * 0.12, height: p * 0.12)
-    c(0.12, 0.12, 0.11).setFill()
-    NSBezierPath(ovalIn: center).fill()
+    drawNote(in: discRect, color: c(0.07, 0.18, 0.21))
 
-    let note = "♪" as NSString
-    let noteAttrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: p * 0.20, weight: .bold),
-        .foregroundColor: c(0.06, 0.06, 0.06, 0.96)
-    ]
-    let noteSize = note.size(withAttributes: noteAttrs)
-    if p >= 64 {
-        note.draw(
-            at: NSPoint(x: discRect.midX - noteSize.width * 0.5, y: discRect.midY - noteSize.height * 0.43),
-            withAttributes: noteAttrs
-        )
-    }
-
-    let fileRect = NSRect(x: p * 0.62, y: p * 0.34, width: p * 0.22, height: p * 0.28)
-    let filePath = rounded(fileRect, p * 0.055)
-    c(0.93, 0.91, 0.87).setFill()
+    let fileRect = NSRect(x: p * 0.67, y: p * 0.35, width: p * 0.20, height: p * 0.30)
+    let filePath = rounded(fileRect, p * 0.050)
+    c(1, 1, 1, 0.96).setFill()
     filePath.fill()
-    c(0.02, 0.02, 0.02, 0.94).setStroke()
-    filePath.lineWidth = max(1, p * 0.012)
+    c(0.11, 0.45, 0.50, 0.88).setStroke()
+    filePath.lineWidth = max(0.6, p * 0.011)
     filePath.stroke()
 
-    c(0.12, 0.12, 0.11).setStroke()
-    for index in 0..<3 {
-        let y = fileRect.minY + p * (0.075 + CGFloat(index) * 0.055)
+    c(0.11, 0.45, 0.50, 0.72).setStroke()
+    for index in 0..<2 {
         let line = NSBezierPath()
-        line.lineWidth = max(1, p * 0.012)
+        line.lineWidth = max(0.6, p * 0.011)
         line.lineCapStyle = .round
+        let y = fileRect.minY + p * (0.10 + CGFloat(index) * 0.070)
         line.move(to: NSPoint(x: fileRect.minX + p * 0.052, y: y))
         line.line(to: NSPoint(x: fileRect.maxX - p * 0.052, y: y))
         line.stroke()
     }
 
     drawArrow(
-        from: NSPoint(x: p * 0.51, y: p * 0.49),
-        to: NSPoint(x: p * 0.62, y: p * 0.49),
-        width: max(1.2, p * 0.018),
-        color: c(0.93, 0.91, 0.87, 0.94)
+        from: NSPoint(x: p * 0.525, y: p * 0.50),
+        to: NSPoint(x: p * 0.62, y: p * 0.50),
+        width: max(0.65, p * 0.018),
+        color: c(0.08, 0.50, 0.55)
     )
 
-    image.unlockFocus()
+    context.flushGraphics()
+    NSGraphicsContext.restoreGraphicsState()
 
-    guard let tiff = image.tiffRepresentation,
-          let bitmap = NSBitmapImageRep(data: tiff),
-          let png = bitmap.representation(using: .png, properties: [:]) else {
+    guard let png = bitmap.representation(using: .png, properties: [:]) else {
         fatalError("Could not render icon")
     }
     try png.write(to: output.appendingPathComponent(variant.name))

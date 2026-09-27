@@ -27,6 +27,13 @@ public partial class MainWindow : Window
     private string? _ffmpegPath;
     private bool _isConverting;
     private bool _updateCheckRunning;
+    private bool _isClosed;
+    private int _pendingImports;
+    private int _importGeneration;
+    private CancellationTokenSource _importCancellation = new();
+    private int _finished;
+    private int _failed;
+    private int _queued;
 
     public MainWindow()
     {
@@ -37,7 +44,7 @@ public partial class MainWindow : Window
         _httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("NCM-Batch-MP3", CurrentVersion));
     }
 
-    public ObservableCollection<QueueItem> QueueItems { get; } = [];
+    public BatchObservableCollection<QueueItem> QueueItems { get; } = [];
     public ObservableCollection<string> Logs { get; } = [];
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -70,6 +77,7 @@ public partial class MainWindow : Window
         UpdateInterface();
 
         await Task.Delay(1200);
+        if (_isClosed) return;
         await CheckForUpdatesAsync(false);
     }
 
@@ -104,34 +112,49 @@ public partial class MainWindow : Window
 
     private async Task AddPathsAsync(IEnumerable<string> paths)
     {
+        if (_isConverting || _isClosed) return;
         var recursive = RecursiveCheckBox.IsChecked == true;
+        var generation = _importGeneration;
+        var cancellationToken = _importCancellation.Token;
+        var inputs = paths.ToArray();
+        _pendingImports++;
+        UpdateInterface();
         OverallStatusText.Text = "正在读取文件…";
-        var files = await Task.Run(() => CollectNcmFiles(paths, recursive));
-        var existing = new HashSet<string>(QueueItems.Select(item => item.FilePath), StringComparer.OrdinalIgnoreCase);
-        var added = 0;
-
-        foreach (var path in files)
+        try
         {
-            if (existing.Add(path))
+            var files = await Task.Run(() => CollectNcmFiles(inputs, recursive, cancellationToken), cancellationToken);
+            if (generation != _importGeneration || _isClosed) return;
+            var existing = new HashSet<string>(QueueItems.Select(item => item.FilePath), StringComparer.OrdinalIgnoreCase);
+            var additions = files.Where(existing.Add).Select(path => new QueueItem(path)).ToArray();
+            QueueItems.AddRange(additions);
+            _queued += additions.Length;
+            if (additions.Length > 0)
             {
-                QueueItems.Add(new QueueItem(path));
-                added++;
+                AddLog($"已添加 {additions.Length} 个 NCM 文件");
+            }
+            OverallStatusText.Text = additions.Length > 0 ? $"已添加 {additions.Length} 个文件" : "没有发现新的 NCM 文件";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (!_isClosed) AddLog($"读取失败 · {ShortError(error.Message)}");
+        }
+        finally
+        {
+            if (generation == _importGeneration && !_isClosed)
+            {
+                _pendingImports--;
+                UpdateInterface();
             }
         }
-
-        if (added > 0)
-        {
-            AddLog($"已添加 {added} 个 NCM 文件");
-        }
-        OverallStatusText.Text = added > 0 ? $"已添加 {added} 个文件" : "没有发现新的 NCM 文件";
-        UpdateInterface();
     }
 
-    private static IReadOnlyList<string> CollectNcmFiles(IEnumerable<string> paths, bool recursive)
+    private static IReadOnlyList<string> CollectNcmFiles(IEnumerable<string> paths, bool recursive, CancellationToken cancellationToken)
     {
         var results = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var candidate in paths)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 if (File.Exists(candidate) && Path.GetExtension(candidate).Equals(".ncm", StringComparison.OrdinalIgnoreCase))
@@ -145,13 +168,20 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                var searchOption = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-                foreach (var file in Directory.EnumerateFiles(candidate, "*.ncm", searchOption))
+                var options = new EnumerationOptions
                 {
+                    RecurseSubdirectories = recursive,
+                    IgnoreInaccessible = true,
+                    AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
+                    MatchCasing = MatchCasing.CaseInsensitive
+                };
+                foreach (var file in Directory.EnumerateFiles(candidate, "*.ncm", options))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
                     results.Add(Path.GetFullPath(file));
                 }
             }
-            catch (Exception error) when (error is UnauthorizedAccessException or IOException)
+            catch (Exception error) when (error is UnauthorizedAccessException or IOException or ArgumentException)
             {
                 // Keep readable files from the same drop even if one folder is protected.
             }
@@ -167,6 +197,7 @@ public partial class MainWindow : Window
             return;
         }
         QueueItems.Remove(selected);
+        RecountStats();
         UpdateInterface();
     }
 
@@ -177,6 +208,12 @@ public partial class MainWindow : Window
             return;
         }
         QueueItems.Clear();
+        _importGeneration++;
+        _importCancellation.Cancel();
+        _importCancellation.Dispose();
+        _importCancellation = new CancellationTokenSource();
+        _pendingImports = 0;
+        RecountStats();
         Logs.Clear();
         OverallProgressBar.Value = 0;
         OverallStatusText.Text = "就绪";
@@ -229,7 +266,7 @@ public partial class MainWindow : Window
 
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
-        if (_isConverting || QueueItems.Count == 0)
+        if (_isConverting || QueueItems.Count == 0 || _pendingImports > 0)
         {
             return;
         }
@@ -251,7 +288,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        foreach (var item in QueueItems)
+        var batch = QueueItems.ToArray();
+        foreach (var item in batch)
         {
             item.Status = QueueStatus.Queued;
             item.Detail = "等待";
@@ -260,6 +298,10 @@ public partial class MainWindow : Window
         }
 
         _conversionCancellation = new CancellationTokenSource();
+        var cancellation = _conversionCancellation;
+        _finished = 0;
+        _failed = 0;
+        _queued = batch.Length;
         SetConverting(true);
         AddLog($"开始转换 {QueueItems.Count} 个文件");
         var processed = 0;
@@ -272,72 +314,83 @@ public partial class MainWindow : Window
             RenameCheckBox.IsChecked == true,
             OverwriteCheckBox.IsChecked == true);
 
-        foreach (var item in QueueItems)
+        try
         {
-            if (_conversionCancellation.IsCancellationRequested)
+            foreach (var item in batch)
             {
-                cancelled = true;
-                item.Status = QueueStatus.Cancelled;
-                item.Detail = "已取消";
-                continue;
+                if (cancellation.IsCancellationRequested)
+                {
+                    cancelled = true;
+                    item.Status = QueueStatus.Cancelled;
+                    item.Detail = "已取消";
+                    _queued--;
+                    continue;
+                }
+
+                item.Status = QueueStatus.Running;
+                item.Detail = "解密中";
+                QueueList.ScrollIntoView(item);
+                UpdateStats();
+
+                var itemIndex = processed;
+                var progress = new Progress<ConversionProgress>(value =>
+                {
+                    if (_isClosed || cancellation.IsCancellationRequested || item.Status != QueueStatus.Running) return;
+                    item.Progress = value.Fraction;
+                    item.Detail = value.Phase switch { "transcode" => "转码中", "metadata" => "写入封面", _ => "解密中" };
+                    OverallProgressBar.Value = (itemIndex + value.Fraction) / batch.Length;
+                    OverallStatusText.Text = $"{Path.GetFileName(item.FilePath)} · {Math.Round(value.Fraction * 100)}%";
+                });
+
+                try
+                {
+                    var result = await Task.Run(() => _converter.ConvertAsync(
+                        item.FilePath,
+                        options,
+                        _ffmpegPath,
+                        cancellation.Token,
+                        progress));
+                    item.Status = QueueStatus.Finished;
+                    item.Detail = result.Message;
+                    item.OutputPath = result.OutputPath;
+                    item.Progress = 1;
+                    _finished++;
+                    AddLog($"完成 · {Path.GetFileName(result.OutputPath)}");
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled = true;
+                    item.Status = QueueStatus.Cancelled;
+                    item.Detail = "已取消";
+                }
+                catch (Exception error)
+                {
+                    failed++;
+                    _failed++;
+                    item.Status = QueueStatus.Failed;
+                    item.Detail = "失败";
+                    AddLog($"失败 · {Path.GetFileName(item.FilePath)} · {ShortError(error.Message)}");
+                }
+
+                processed++;
+                _queued--;
+                OverallProgressBar.Value = processed / (double)batch.Length;
+                UpdateStats();
             }
 
-            item.Status = QueueStatus.Running;
-            item.Detail = "解密中";
-            QueueList.ScrollIntoView(item);
-            UpdateStats();
-
-            var itemIndex = processed;
-            var progress = new Progress<ConversionProgress>(value =>
-            {
-                item.Progress = value.Fraction;
-                item.Detail = value.Phase == "transcode" ? "转码中" : "解密中";
-                OverallProgressBar.Value = (itemIndex + value.Fraction) / QueueItems.Count;
-                OverallStatusText.Text = $"{Path.GetFileName(item.FilePath)} · {Math.Round(value.Fraction * 100)}%";
-            });
-
-            try
-            {
-                var result = await _converter.ConvertAsync(
-                    item.FilePath,
-                    options,
-                    _ffmpegPath,
-                    _conversionCancellation.Token,
-                    progress);
-                item.Status = QueueStatus.Finished;
-                item.Detail = result.Message;
-                item.OutputPath = result.OutputPath;
-                item.Progress = 1;
-                AddLog($"完成 · {Path.GetFileName(result.OutputPath)}");
-            }
-            catch (OperationCanceledException)
-            {
-                cancelled = true;
-                item.Status = QueueStatus.Cancelled;
-                item.Detail = "已取消";
-            }
-            catch (Exception error)
-            {
-                failed++;
-                item.Status = QueueStatus.Failed;
-                item.Detail = "失败";
-                AddLog($"失败 · {Path.GetFileName(item.FilePath)} · {ShortError(error.Message)}");
-            }
-
-            processed++;
-            OverallProgressBar.Value = processed / (double)QueueItems.Count;
-            UpdateStats();
+            OverallStatusText.Text = cancelled
+                ? "转换已取消"
+                : failed == 0
+                    ? $"全部完成 · {processed} 个文件"
+                    : $"转换完成 · {failed} 个失败";
+            AddLog(cancelled ? "转换已取消" : "批量转换结束");
         }
-
-        OverallStatusText.Text = cancelled
-            ? "转换已取消"
-            : failed == 0
-                ? $"全部完成 · {processed} 个文件"
-                : $"转换完成 · {failed} 个失败";
-        AddLog(cancelled ? "转换已取消" : "批量转换结束");
-        SetConverting(false);
-        _conversionCancellation.Dispose();
-        _conversionCancellation = null;
+        finally
+        {
+            if (!_isClosed) SetConverting(false);
+            _conversionCancellation = null;
+            cancellation.Dispose();
+        }
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
@@ -395,7 +448,7 @@ public partial class MainWindow : Window
 
     private async Task CheckForUpdatesAsync(bool manual)
     {
-        if (_updateCheckRunning)
+        if (_updateCheckRunning || _isClosed)
         {
             return;
         }
@@ -411,6 +464,7 @@ public partial class MainWindow : Window
             var tagName = root.TryGetProperty("tag_name", out var tag) ? tag.GetString() : null;
             var releaseUrl = root.TryGetProperty("html_url", out var url) ? url.GetString() : null;
             var officialUri = UpdateRules.OfficialReleaseUri(tagName, releaseUrl);
+            if (_isClosed) return;
             if (officialUri is null)
             {
                 throw new InvalidDataException("更新地址不可信");
@@ -440,7 +494,7 @@ public partial class MainWindow : Window
         }
         catch
         {
-            MessageBox.Show(this, "暂时无法检查更新，请稍后再试。", "检查更新失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            if (!_isClosed) MessageBox.Show(this, "暂时无法检查更新，请稍后再试。", "检查更新失败", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally
         {
@@ -491,21 +545,29 @@ public partial class MainWindow : Window
     {
         EmptyState.Visibility = QueueItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         QueueSummaryText.Text = $"{QueueItems.Count} 个文件";
-        StartButton.IsEnabled = !_isConverting && QueueItems.Count > 0;
-        ClearButton.IsEnabled = !_isConverting && QueueItems.Count > 0;
+        StartButton.IsEnabled = !_isConverting && _pendingImports == 0 && QueueItems.Count > 0;
+        ClearButton.IsEnabled = !_isConverting && (QueueItems.Count > 0 || _pendingImports > 0);
         RemoveButton.IsEnabled = !_isConverting && QueueList.SelectedItem is not null;
         UpdateStats();
     }
 
     private void UpdateStats()
     {
-        QueuedCountText.Text = QueueItems.Count(item => item.Status is QueueStatus.Queued or QueueStatus.Running).ToString();
-        FinishedCountText.Text = QueueItems.Count(item => item.Status == QueueStatus.Finished).ToString();
-        FailedCountText.Text = QueueItems.Count(item => item.Status == QueueStatus.Failed).ToString();
+        QueuedCountText.Text = _queued.ToString();
+        FinishedCountText.Text = _finished.ToString();
+        FailedCountText.Text = _failed.ToString();
+    }
+
+    private void RecountStats()
+    {
+        _queued = QueueItems.Count(item => item.Status is QueueStatus.Queued or QueueStatus.Running);
+        _finished = QueueItems.Count(item => item.Status == QueueStatus.Finished);
+        _failed = QueueItems.Count(item => item.Status == QueueStatus.Failed);
     }
 
     private void AddLog(string message)
     {
+        if (_isClosed) return;
         Logs.Add($"{DateTime.Now:HH:mm:ss}  {message}");
         while (Logs.Count > 200)
         {
@@ -553,9 +615,11 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _isClosed = true;
+        _importCancellation.Cancel();
+        _importCancellation.Dispose();
         ThemeManager.ThemeChanged -= ThemeManager_ThemeChanged;
         _conversionCancellation?.Cancel();
-        _conversionCancellation?.Dispose();
         _httpClient.Dispose();
         base.OnClosed(e);
     }

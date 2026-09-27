@@ -25,10 +25,6 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1
 
 mkdir -p "$BUILD_DIR" "$PUBLISH_DIR" "$(dirname "$WIN_FFMPEG")"
 
-echo "Preparing app and installer artwork..."
-python3 "$WINDOWS_DIR/scripts/make_icon.py"
-python3 "$WINDOWS_DIR/scripts/make_installer_assets.py"
-
 if [[ ! -f "$WIN_FFMPEG" ]]; then
   echo "Downloading Windows ffmpeg..."
   FFMPEG_ARCHIVE="$BUILD_DIR/win32-x64-4.1.0.tgz"
